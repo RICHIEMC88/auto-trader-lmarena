@@ -1,2 +1,6 @@
 ctrader-open-api
 requests
+twisted[ssl]
+pyOpenSSL
+service_identity
+cryptography
