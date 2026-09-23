@@ -22,9 +22,13 @@ jobs:
       - name: Verificar que el secreto llegó
         env:
           DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
-        run: echo "Longitud del token = ${#DERIV_API_TOKEN}"
+          DERIV_APP_ID: ${{ secrets.DERIV_APP_ID }}
+        run: |
+          echo "Longitud del token = ${#DERIV_API_TOKEN}"
+          echo "Longitud app_id = ${#DERIV_APP_ID}"
 
       - name: Probar conexión (auth + símbolos + cotización)
         env:
           DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
+          DERIV_APP_ID: ${{ secrets.DERIV_APP_ID }}
         run: python test_deriv_api.py
