@@ -24,8 +24,14 @@ jobs:
           DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
           DERIV_APP_ID: ${{ secrets.DERIV_APP_ID }}
         run: |
-          echo "Longitud del token = ${#DERIV_API_TOKEN}"
-          echo "Longitud app_id = ${#DERIV_APP_ID}"
+          T="$DERIV_API_TOKEN"
+          echo "Longitud token = ${#T}"
+          echo "Primeros 6: ${T:0:6}"
+          echo "Últimos 6:  ...${T: -6}"
+          echo "App ID = ${DERIV_APP_ID:-VACIO}"
+          if [ "${T:0:1}" = '"' ] || [ "${T: -1}" = '"' ]; then
+            echo "⚠️ El token tiene COMILLAS — se pegó mal."
+          fi
 
       - name: Probar conexión (auth + símbolos + cotización)
         env:
