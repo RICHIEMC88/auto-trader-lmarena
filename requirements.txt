@@ -1,6 +1,4 @@
-ctrader-open-api
+yfinance
+pandas
 requests
-twisted[ssl]
-pyOpenSSL
-service_identity
-cryptography
+websockets
