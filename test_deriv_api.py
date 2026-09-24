@@ -99,7 +99,21 @@ async def check_symbols_and_proposal(ws, tag):
     if "error" in r:
         print(f"❌ active_symbols: {r['error']}")
         return False
-    have = {s["symbol"]: s for s in r.get("active_symbols", [])}
+    # La API nueva puede traer "symbol" o "id" — acepta ambos.
+    items = r.get("active_symbols", [])
+    if items:
+        keys0 = sorted(items[0].keys())
+        print(f"   ℹ️ claves del primer ítem: {keys0[:14]}")
+    def _key(s):
+        return s.get("symbol") or s.get("id") or s.get("name")
+    have = {}
+    for s in items:
+        k = _key(s)
+        if k:
+            have[k] = s
+    if not have:
+        print(f"❌ active_symbols sin campo symbol/id. Ejemplo: {items[:1]}")
+        return False
     print(f"   ({len(have)} símbolos)")
     ok_all = True
     for w in WANT:
