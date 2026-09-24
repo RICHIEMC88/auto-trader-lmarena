@@ -212,13 +212,15 @@ async def test_classic():
 
 
 async def main():
+    print(f"🧩 Modo: {'NUEVO (PAT+OTP) → demo' if APP_ID else 'CLÁSICO'} | "
+          f"APP_ID len={len(APP_ID)} | token len={len(TOKEN)}")
     if TOKEN in ("", "PEGA_AQUI_TU_TOKEN"):
         print("❌ Falta DERIV_API_TOKEN (PAT en developers.deriv.com o token clásico).")
         raise SystemExit(1)
     if APP_ID:
         ok = await test_new_pat_otp()
     else:
-        print("ℹ️ Sin DERIV_APP_ID → modo clásico.")
+        print("ℹ️ Sin DERIV_APP_ID → modo clásico (NO entra a la demo; solo diagnóstico).")
         ok = await test_classic()
     print("=" * 60)
     if ok:
