@@ -95,7 +95,7 @@ async def ws_rpc(ws, payload, req_id, timeout=25):
 async def check_symbols_and_proposal(ws, tag):
     """active_symbols + cotización MULTUP en una conexión WS ya abierta."""
     print(f"📊 [{tag}] active_symbols ...")
-    r = await ws_rpc(ws, {"active_symbols": "brief", "product_type": "basic"}, 90)
+    r = await ws_rpc(ws, {"active_symbols": "brief"}, 90)
     if "error" in r:
         print(f"❌ active_symbols: {r['error']}")
         return False
@@ -231,17 +231,22 @@ async def main():
 
 
 if __name__ == "__main__":
+    exit_code = 0
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
+    except SystemExit as ex:
+        exit_code = int(ex.code or 0)
+    except KeyboardInterrupt:
         pass
     except Exception as ex:
         import traceback
         print(f"❌ {type(ex).__name__}: {ex}")
         traceback.print_exc()
+        exit_code = 1
     finally:
         if not os.environ.get("CI"):
             try:
                 input("\n===== Pulsa ENTER para cerrar esta ventana =====")
             except EOFError:
                 pass
+    raise SystemExit(exit_code)
