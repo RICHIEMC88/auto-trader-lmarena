@@ -70,22 +70,36 @@ def calc_usd():
     risk_pct = abs(ENTRY - SL) / ENTRY
     rew_pct  = abs(TP - ENTRY) / ENTRY
 
-    mult = MULTIPLIER
-    adj_mult = False
-    if risk_pct > 0 and mult * risk_pct > 0.9:
-        mult = max(1.0, int(0.9 / risk_pct))
-        adj_mult = True
+    # FIX 2026-09-24: Deriv solo acepta multipliers 100,200,300,500,800 para forex/crypto
+    # Antes bajabamos a 20 para respetar stop-out, pero Deriv rechaza 20 con MultiplierOutOfRange
+    # Ahora usamos siempre 100 (minimo permitido) y capeamos SL a 90% del stake si es necesario
+    ALLOWED_MULTS = [100, 200, 300, 500, 800, 1000]
+    # Elige el mult configurado si esta permitido, si no 100
+    if MULTIPLIER in ALLOWED_MULTS:
+        mult = MULTIPLIER
+    else:
+        # Si pide 20, 50, etc, usa 100 que es el minimo aceptado por Deriv para frx/cry
+        mult = 100
 
-    sl_usd = STAKE * mult * risk_pct
-    tp_usd = STAKE * mult * rew_pct
+    adj = False
+    # Si el riesgo tecnico es muy amplio para mult 100, capeamos el SL a 90% del stake
+    # Efectivo: SL real sera mas ajustado que el tecnico, pero Deriv lo acepta
+    if risk_pct > 0 and mult * risk_pct > 0.9:
+        sl_usd = STAKE * 0.9  # cap 90% del stake (max permitido sin stop-out inmediato)
+        tp_usd = sl_usd * 3.0
+        adj = True
+        print(f"   ⚠️ Riesgo tecnico {risk_pct*100:.2f}% muy amplio para mult {mult} -> SL capeado a 90% stake ({sl_usd} USD) para respetar limites Deriv (100,200,300...)")
+    else:
+        sl_usd = STAKE * mult * risk_pct
+        tp_usd = STAKE * mult * rew_pct
 
     sl_usd, tp_usd = round(sl_usd, 2), round(tp_usd, 2)
-    adj = adj_mult
     if sl_usd < MIN_USD:
         sl_usd = MIN_USD; adj = True
     if tp_usd < MIN_USD:
         tp_usd = MIN_USD; adj = True
-    if adj:
+    if adj and mult * risk_pct <= 0.9:
+        # Solo recalcula TP si no fue ya capeado arriba
         tp_usd = round(max(tp_usd, sl_usd * 3.0), 2)
 
     return sl_usd, tp_usd, adj, mult
