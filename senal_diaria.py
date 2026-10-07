@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BOT v9 - SOLO 14 PARES FOREX QUE DERIV SI OFRECE COMO MULTIPLIERS (fix TradingDurationNotAllowed)
-- Deriv Multipliers Forex solo tiene 14 pares validos, no 28
-- 5 son Invalid symbol: NZDCAD, NZDCHF, CADJPY, CADCHF, CHFJPY
-- 9 solo muestran precio pero NO se pueden operar como multipliers: AUDNZD, AUDCAD, AUDCHF, NZDUSD, EURNZD, GBPCAD, GBPCHF, GBPNZD, NZDJPY
-- Los 14 que SI funcionan: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, EURGBP, EURJPY, EURAUD, EURCAD, EURCHF, GBPJPY, GBPAUD, AUDJPY
-- De esos, los de baja volatilidad como AUDNZD son: EURGBP, EURCHF (muy baja), AUDUSD, USDCAD, USDCHF
-- v9 usa solo los 14 validos, diario 60, cada 2h, solo abre/cierra
+BOT v11 - 1 OPERACION POR PAR, HASTA 30 PARES DIFERENTES SIMULTANEOS
+- Requisito usuario: pueda haber 1 operacion por cada par, aunque sean 30 al mismo tiempo de diferentes pares
+- v10 tenia MAX 3, v11 sube a 30
+- Sigue bloqueando duplicado del mismo par: si EURAUD ya abierto, no abre otro EURAUD hasta que cierre
+- 14 pares validos multipliers, diario 60, 100x, cada 2h
 """
 import os, sys, time, json, subprocess, requests, pandas as pd, yfinance as yf
 
@@ -17,23 +15,23 @@ TG_CHAT=e("TELEGRAM_CHAT_ID","").strip()
 TRADE_AUTOMATIC=e("TRADE_AUTOMATIC","true").lower() in ("1","true","yes")
 RUN_INTERVAL_HOURS=int(e("RUN_INTERVAL_HOURS","2"))
 MIN_RR=float(e("MIN_RR","3.0"))
+MAX_OPEN_TRADES=int(e("MAX_OPEN_TRADES","30"))
 
-# 14 PARES QUE DERIV SI OFRECE COMO MULTIPLIERS (verificado live demo)
 INSTRUMENTOS={
- "EURUSD": {"ticker":"EURUSD=X", "deriv_sym":"frxEURUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/USD - mayor liquido"},
- "GBPUSD": {"ticker":"GBPUSD=X", "deriv_sym":"frxGBPUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"GBP/USD - volatilidad media"},
- "USDJPY": {"ticker":"USDJPY=X", "deriv_sym":"frxUSDJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo", "desc":"USD/JPY - tendencia clara"},
- "AUDUSD": {"ticker":"AUDUSD=X", "deriv_sym":"frxAUDUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"AUD/USD - commodity, baja vol"},
- "USDCAD": {"ticker":"USDCAD=X", "deriv_sym":"frxUSDCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"USD/CAD - commodity"},
- "USDCHF": {"ticker":"USDCHF=X", "deriv_sym":"frxUSDCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"USD/CHF - refugio"},
- "EURGBP": {"ticker":"EURGBP=X", "deriv_sym":"frxEURGBP", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/GBP - MUY baja vol (como AUDNZD)"},
- "EURJPY": {"ticker":"EURJPY=X", "deriv_sym":"frxEURJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/JPY - cruce volatil"},
- "EURAUD": {"ticker":"EURAUD=X", "deriv_sym":"frxEURAUD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/AUD"},
- "EURCAD": {"ticker":"EURCAD=X", "deriv_sym":"frxEURCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/CAD"},
- "EURCHF": {"ticker":"EURCHF=X", "deriv_sym":"frxEURCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/CHF - baja vol"},
- "GBPJPY": {"ticker":"GBPJPY=X", "deriv_sym":"frxGBPJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo", "desc":"GBP/JPY - alta vol"},
- "GBPAUD": {"ticker":"GBPAUD=X", "deriv_sym":"frxGBPAUD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"GBP/AUD"},
- "AUDJPY": {"ticker":"AUDJPY=X", "deriv_sym":"frxAUDJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo", "desc":"AUD/JPY - commodity + JPY"},
+ "EURUSD": {"ticker":"EURUSD=X", "deriv_sym":"frxEURUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "GBPUSD": {"ticker":"GBPUSD=X", "deriv_sym":"frxGBPUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "USDJPY": {"ticker":"USDJPY=X", "deriv_sym":"frxUSDJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo"},
+ "AUDUSD": {"ticker":"AUDUSD=X", "deriv_sym":"frxAUDUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "USDCAD": {"ticker":"USDCAD=X", "deriv_sym":"frxUSDCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "USDCHF": {"ticker":"USDCHF=X", "deriv_sym":"frxUSDCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "EURGBP": {"ticker":"EURGBP=X", "deriv_sym":"frxEURGBP", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "EURJPY": {"ticker":"EURJPY=X", "deriv_sym":"frxEURJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo"},
+ "EURAUD": {"ticker":"EURAUD=X", "deriv_sym":"frxEURAUD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "EURCAD": {"ticker":"EURCAD=X", "deriv_sym":"frxEURCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "EURCHF": {"ticker":"EURCHF=X", "deriv_sym":"frxEURCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "GBPJPY": {"ticker":"GBPJPY=X", "deriv_sym":"frxGBPJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo"},
+ "GBPAUD": {"ticker":"GBPAUD=X", "deriv_sym":"frxGBPAUD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "AUDJPY": {"ticker":"AUDJPY=X", "deriv_sym":"frxAUDJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo"},
 }
 
 SCRIPT_DIR=os.path.dirname(os.path.abspath(__file__))
@@ -156,7 +154,7 @@ def elegir_mejor():
     return validos_sorted[0], validos_sorted
 
 def fmt_px(v,d): return f"{v:,.{d}f}"
-def texto_senal(mejor,todos,abierto):
+def texto_senal(mejor,abierto):
     s=mejor; riesgo=abs(s["precio"]-s["sl"]); benef=abs(s["tp"]-s["precio"]); rr=round(benef/riesgo,2) if riesgo else 0
     return "\n".join([
         f"🚀 <b>SEÑAL ABIERTA - {s['nombre']}</b>",f"🧠 Estrategia: <b>{s['estrategia']}</b> | {s['interval']} | Conf {s['confianza']}/{s['min_score']}",
@@ -185,6 +183,13 @@ def add_open_trade(cid,mejor,mult,sl_usd,tp_usd):
     tr=load_open_trades()
     tr.append({"contract_id":cid,"nombre":mejor["nombre"],"base":mejor["base"],"deriv_sym":mejor["deriv_sym"],"direccion":mejor["direccion"],"precio":mejor["precio"],"sl":mejor["sl"],"tp":mejor["tp"],"stake":mejor["stake"],"dec":mejor["dec"],"mult":mult,"estrategia":mejor["estrategia"],"confianza":mejor["confianza"],"interval":mejor["interval"],"min_score":mejor["min_score"],"open_time":time.strftime("%Y-%m-%d %H:%M:%S")})
     save_open_trades(tr)
+
+def is_symbol_open(base):
+    trades=load_open_trades()
+    for t in trades:
+        if t.get("base")==base:
+            return True
+    return False
 
 def check_closed_trades():
     trades=load_open_trades()
@@ -227,6 +232,9 @@ def check_closed_trades():
             async with websockets.connect(ws_url,open_timeout=15) as ws:
                 for tr in trades:
                     cid=tr.get("contract_id")
+                    if not cid or cid.startswith("TEMP"): 
+                        remaining.append(tr)
+                        continue
                     try:
                         r=await rpc(ws,{"proposal_open_contract":1,"contract_id":cid},101)
                         if "error" in r:
@@ -265,24 +273,31 @@ def abrir_en_deriv(mejor):
     except Exception as ex: return False,f"Error Deriv: {ex}",None
 
 def ciclo():
-    print(f"🔍 Analizando {len(INSTRUMENTOS)*2} señales (2h) - 14 pares validos multipliers - Forex 60")
+    print(f"🔍 Analizando {len(INSTRUMENTOS)*2} señales (2h) - v11 1 por par, max {MAX_OPEN_TRADES}")
     check_closed_trades()
+    open_trades=load_open_trades()
+    print(f" 📂 Abiertas: {len(open_trades)}/{MAX_OPEN_TRADES} -> {[t.get('base') for t in open_trades]}")
+    if len(open_trades) >= MAX_OPEN_TRADES:
+        print(f" ⏸️ Max {MAX_OPEN_TRADES} alcanzado")
+        return
     mejor,todos=elegir_mejor()
     if mejor is None:
         print(" Sin datos"); return
     if mejor["confianza"]<mejor["min_score"]:
-        print(f" ⏭️ descartado: {mejor['nombre']} conf {mejor['confianza']} < {mejor['min_score']} [{mejor['estrategia']}] - NO Telegram")
+        print(f" ⏭️ descartado: {mejor['nombre']} conf {mejor['confianza']} < {mejor['min_score']}")
         return
     for intento in todos:
         if intento["confianza"] < intento["min_score"]: continue
+        if is_symbol_open(intento["base"]):
+            print(f" ⏭️ {intento['nombre']} ya abierto (1 por par), probando siguiente...")
+            continue
         print(f"🏆 Intentando: {intento['nombre']} {intento['direccion']} conf {intento['confianza']}/{intento['min_score']} [{intento['estrategia']}]")
         if TRADE_AUTOMATIC:
             tg(f"🚀 <b>Abriendo DEMO...</b>\n{intento['nombre']} {'COMPRA' if intento['direccion']=='BUY' else 'VENTA'}\nEstrategia: <b>{intento['estrategia']}</b> | Conf {intento['confianza']}/{intento['min_score']}")
             ok,salida,cid=abrir_en_deriv(intento)
             print(salida[-800:])
             if not ok and ("TradingDurationNotAllowed" in salida or "Trading is not offered" in salida or "Invalid symbol" in salida):
-                print(f" ⏭️ {intento['nombre']} no disponible como multiplier, probando siguiente...")
-                tg(f"⏭️ <b>{intento['nombre']} no disponible en Deriv multipliers</b> [{intento['estrategia']}], probando siguiente...")
+                print(f" ⏭️ {intento['nombre']} no disponible, siguiente...")
                 continue
             if not ok:
                 tg(f"❌ Error abrir [{intento['estrategia']}]:\n<code>{salida[-500:]}</code>")
@@ -290,14 +305,13 @@ def ciclo():
             else:
                 if cid: add_open_trade(cid,intento,100,0,0)
                 else: add_open_trade(f"TEMP-{int(time.time())}",intento,100,0,0)
-                tg(texto_senal(intento,todos,True))
-                print(f"✅ Señal enviada {intento['nombre']} [{intento['estrategia']}]")
+                tg(texto_senal(intento,True))
+                print(f"✅ Señal enviada {intento['nombre']}")
                 return
-    print(" ⏭️ Ningun par disponible")
+    print(" ⏭️ Ningun par nuevo disponible")
 
 def main():
-    print(f"✅ Bot v9 14 PARES VALIDOS MULTIPLIERS iniciado. Intervalo {RUN_INTERVAL_HOURS}h | {len(INSTRUMENTOS)} pares | MIN_SCORE 60")
-    print("   Pares validos: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, EURGBP, EURJPY, EURAUD, EURCAD, EURCHF, GBPJPY, GBPAUD, AUDJPY")
+    print(f"✅ Bot v11 1xPAR MAX{MAX_OPEN_TRADES} iniciado. {RUN_INTERVAL_HOURS}h | {len(INSTRUMENTOS)} pares | 60")
     while True:
         try: ciclo()
         except Exception as ex: print("[ciclo]",ex)
