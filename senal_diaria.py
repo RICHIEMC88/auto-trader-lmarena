@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BOT v7 - FOREX BAJA VOLATILIDAD en 60 (como al principio) + cada 2h + solo abre/cierra
-- AUDNZD, EURGBP, EURCHF, AUDCAD, NZDCAD, AUDCHF -> diario 1d, MIN_SCORE 60
-- BTC/XAU desactivados para Deriv multipliers (pierden por capeo)
+BOT v9 - SOLO 14 PARES FOREX QUE DERIV SI OFRECE COMO MULTIPLIERS (fix TradingDurationNotAllowed)
+- Deriv Multipliers Forex solo tiene 14 pares validos, no 28
+- 5 son Invalid symbol: NZDCAD, NZDCHF, CADJPY, CADCHF, CHFJPY
+- 9 solo muestran precio pero NO se pueden operar como multipliers: AUDNZD, AUDCAD, AUDCHF, NZDUSD, EURNZD, GBPCAD, GBPCHF, GBPNZD, NZDJPY
+- Los 14 que SI funcionan: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, EURGBP, EURJPY, EURAUD, EURCAD, EURCHF, GBPJPY, GBPAUD, AUDJPY
+- De esos, los de baja volatilidad como AUDNZD son: EURGBP, EURCHF (muy baja), AUDUSD, USDCAD, USDCHF
+- v9 usa solo los 14 validos, diario 60, cada 2h, solo abre/cierra
 """
 import os, sys, time, json, subprocess, requests, pandas as pd, yfinance as yf
 
@@ -14,13 +18,22 @@ TRADE_AUTOMATIC=e("TRADE_AUTOMATIC","true").lower() in ("1","true","yes")
 RUN_INTERVAL_HOURS=int(e("RUN_INTERVAL_HOURS","2"))
 MIN_RR=float(e("MIN_RR","3.0"))
 
+# 14 PARES QUE DERIV SI OFRECE COMO MULTIPLIERS (verificado live demo)
 INSTRUMENTOS={
- "AUDNZD": {"ticker":"AUDNZD=X", "deriv_sym":"frxAUDNZD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "EURGBP": {"ticker":"EURGBP=X", "deriv_sym":"frxEURGBP", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "EURCHF": {"ticker":"EURCHF=X", "deriv_sym":"frxEURCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "AUDCAD": {"ticker":"AUDCAD=X", "deriv_sym":"frxAUDCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "NZDCAD": {"ticker":"NZDCAD=X", "deriv_sym":"frxNZDCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "AUDCHF": {"ticker":"AUDCHF=X", "deriv_sym":"frxAUDCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
+ "EURUSD": {"ticker":"EURUSD=X", "deriv_sym":"frxEURUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/USD - mayor liquido"},
+ "GBPUSD": {"ticker":"GBPUSD=X", "deriv_sym":"frxGBPUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"GBP/USD - volatilidad media"},
+ "USDJPY": {"ticker":"USDJPY=X", "deriv_sym":"frxUSDJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo", "desc":"USD/JPY - tendencia clara"},
+ "AUDUSD": {"ticker":"AUDUSD=X", "deriv_sym":"frxAUDUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"AUD/USD - commodity, baja vol"},
+ "USDCAD": {"ticker":"USDCAD=X", "deriv_sym":"frxUSDCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"USD/CAD - commodity"},
+ "USDCHF": {"ticker":"USDCHF=X", "deriv_sym":"frxUSDCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"USD/CHF - refugio"},
+ "EURGBP": {"ticker":"EURGBP=X", "deriv_sym":"frxEURGBP", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/GBP - MUY baja vol (como AUDNZD)"},
+ "EURJPY": {"ticker":"EURJPY=X", "deriv_sym":"frxEURJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/JPY - cruce volatil"},
+ "EURAUD": {"ticker":"EURAUD=X", "deriv_sym":"frxEURAUD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/AUD"},
+ "EURCAD": {"ticker":"EURCAD=X", "deriv_sym":"frxEURCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/CAD"},
+ "EURCHF": {"ticker":"EURCHF=X", "deriv_sym":"frxEURCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"EUR/CHF - baja vol"},
+ "GBPJPY": {"ticker":"GBPJPY=X", "deriv_sym":"frxGBPJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo", "desc":"GBP/JPY - alta vol"},
+ "GBPAUD": {"ticker":"GBPAUD=X", "deriv_sym":"frxGBPAUD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo", "desc":"GBP/AUD"},
+ "AUDJPY": {"ticker":"AUDJPY=X", "deriv_sym":"frxAUDJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo", "desc":"AUD/JPY - commodity + JPY"},
 }
 
 SCRIPT_DIR=os.path.dirname(os.path.abspath(__file__))
@@ -139,7 +152,8 @@ def elegir_mejor():
     if not validos:
         mejor=max(res,key=lambda x:x["confianza"])
         return mejor, res
-    return max(validos,key=lambda x:x["confianza"]), res
+    validos_sorted=sorted(validos,key=lambda x:x["confianza"], reverse=True)
+    return validos_sorted[0], validos_sorted
 
 def fmt_px(v,d): return f"{v:,.{d}f}"
 def texto_senal(mejor,todos,abierto):
@@ -251,7 +265,7 @@ def abrir_en_deriv(mejor):
     except Exception as ex: return False,f"Error Deriv: {ex}",None
 
 def ciclo():
-    print(f"🔍 Analizando {len(INSTRUMENTOS)*2} señales (2h) - Forex 60")
+    print(f"🔍 Analizando {len(INSTRUMENTOS)*2} señales (2h) - 14 pares validos multipliers - Forex 60")
     check_closed_trades()
     mejor,todos=elegir_mejor()
     if mejor is None:
@@ -259,21 +273,31 @@ def ciclo():
     if mejor["confianza"]<mejor["min_score"]:
         print(f" ⏭️ descartado: {mejor['nombre']} conf {mejor['confianza']} < {mejor['min_score']} [{mejor['estrategia']}] - NO Telegram")
         return
-    print(f"🏆 Mejor: {mejor['nombre']} {mejor['direccion']} conf {mejor['confianza']}/{mejor['min_score']} [{mejor['estrategia']}]")
-    if TRADE_AUTOMATIC:
-        tg(f"🚀 <b>Abriendo DEMO...</b>\n{mejor['nombre']} {'COMPRA' if mejor['direccion']=='BUY' else 'VENTA'}\nEstrategia: <b>{mejor['estrategia']}</b> | Conf {mejor['confianza']}/{mejor['min_score']}")
-        ok,salida,cid=abrir_en_deriv(mejor)
-        print(salida[-800:])
-        if not ok:
-            tg(f"❌ Error abrir [{mejor['estrategia']}]:\n<code>{salida[-500:]}</code>")
-        else:
-            if cid: add_open_trade(cid,mejor,100,0,0)
-            else: add_open_trade(f"TEMP-{int(time.time())}",mejor,100,0,0)
-            tg(texto_senal(mejor,todos,True))
+    for intento in todos:
+        if intento["confianza"] < intento["min_score"]: continue
+        print(f"🏆 Intentando: {intento['nombre']} {intento['direccion']} conf {intento['confianza']}/{intento['min_score']} [{intento['estrategia']}]")
+        if TRADE_AUTOMATIC:
+            tg(f"🚀 <b>Abriendo DEMO...</b>\n{intento['nombre']} {'COMPRA' if intento['direccion']=='BUY' else 'VENTA'}\nEstrategia: <b>{intento['estrategia']}</b> | Conf {intento['confianza']}/{intento['min_score']}")
+            ok,salida,cid=abrir_en_deriv(intento)
+            print(salida[-800:])
+            if not ok and ("TradingDurationNotAllowed" in salida or "Trading is not offered" in salida or "Invalid symbol" in salida):
+                print(f" ⏭️ {intento['nombre']} no disponible como multiplier, probando siguiente...")
+                tg(f"⏭️ <b>{intento['nombre']} no disponible en Deriv multipliers</b> [{intento['estrategia']}], probando siguiente...")
+                continue
+            if not ok:
+                tg(f"❌ Error abrir [{intento['estrategia']}]:\n<code>{salida[-500:]}</code>")
+                return
+            else:
+                if cid: add_open_trade(cid,intento,100,0,0)
+                else: add_open_trade(f"TEMP-{int(time.time())}",intento,100,0,0)
+                tg(texto_senal(intento,todos,True))
+                print(f"✅ Señal enviada {intento['nombre']} [{intento['estrategia']}]")
+                return
+    print(" ⏭️ Ningun par disponible")
 
 def main():
-    print(f"✅ Bot v7 FOREX 60 iniciado. Intervalo {RUN_INTERVAL_HOURS}h | {len(INSTRUMENTOS)} pares baja vol | MIN_SCORE 60")
-    print("   Pares: AUDNZD, EURGBP, EURCHF, AUDCAD, NZDCAD, AUDCHF (todos 1d 60) | Solo abre/cierra")
+    print(f"✅ Bot v9 14 PARES VALIDOS MULTIPLIERS iniciado. Intervalo {RUN_INTERVAL_HOURS}h | {len(INSTRUMENTOS)} pares | MIN_SCORE 60")
+    print("   Pares validos: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, EURGBP, EURJPY, EURAUD, EURCAD, EURCHF, GBPJPY, GBPAUD, AUDJPY")
     while True:
         try: ciclo()
         except Exception as ex: print("[ciclo]",ex)
