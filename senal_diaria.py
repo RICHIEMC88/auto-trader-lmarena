@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BOT v11 - 1 OPERACION POR PAR, HASTA 30 PARES DIFERENTES SIMULTANEOS
-- Requisito usuario: pueda haber 1 operacion por cada par, aunque sean 30 al mismo tiempo de diferentes pares
-- v10 tenia MAX 3, v11 sube a 30
-- Sigue bloqueando duplicado del mismo par: si EURAUD ya abierto, no abre otro EURAUD hasta que cierre
-- 14 pares validos multipliers, diario 60, 100x, cada 2h
+BOT v14 - MIN_SCORE 70 + 1 por par hasta 30 + fix P&L + fix proposal
+- Usuario pidio subir de 65 a 70 para filtrar mas y reducir perdidas
+- 14 pares validos multipliers, diario 70, 100x, 2h, 1 por par max 30
 """
 import os, sys, time, json, subprocess, requests, pandas as pd, yfinance as yf
 
@@ -18,20 +16,20 @@ MIN_RR=float(e("MIN_RR","3.0"))
 MAX_OPEN_TRADES=int(e("MAX_OPEN_TRADES","30"))
 
 INSTRUMENTOS={
- "EURUSD": {"ticker":"EURUSD=X", "deriv_sym":"frxEURUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "GBPUSD": {"ticker":"GBPUSD=X", "deriv_sym":"frxGBPUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "USDJPY": {"ticker":"USDJPY=X", "deriv_sym":"frxUSDJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo"},
- "AUDUSD": {"ticker":"AUDUSD=X", "deriv_sym":"frxAUDUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "USDCAD": {"ticker":"USDCAD=X", "deriv_sym":"frxUSDCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "USDCHF": {"ticker":"USDCHF=X", "deriv_sym":"frxUSDCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "EURGBP": {"ticker":"EURGBP=X", "deriv_sym":"frxEURGBP", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "EURJPY": {"ticker":"EURJPY=X", "deriv_sym":"frxEURJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo"},
- "EURAUD": {"ticker":"EURAUD=X", "deriv_sym":"frxEURAUD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "EURCAD": {"ticker":"EURCAD=X", "deriv_sym":"frxEURCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "EURCHF": {"ticker":"EURCHF=X", "deriv_sym":"frxEURCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "GBPJPY": {"ticker":"GBPJPY=X", "deriv_sym":"frxGBPJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo"},
- "GBPAUD": {"ticker":"GBPAUD=X", "deriv_sym":"frxGBPAUD", "stake":10.0, "dec":5, "interval":"1d", "min_score":60, "period":"8mo"},
- "AUDJPY": {"ticker":"AUDJPY=X", "deriv_sym":"frxAUDJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":60, "period":"8mo"},
+ "EURUSD": {"ticker":"EURUSD=X", "deriv_sym":"frxEURUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":70, "period":"8mo"},
+ "GBPUSD": {"ticker":"GBPUSD=X", "deriv_sym":"frxGBPUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":70, "period":"8mo"},
+ "USDJPY": {"ticker":"USDJPY=X", "deriv_sym":"frxUSDJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":70, "period":"8mo"},
+ "AUDUSD": {"ticker":"AUDUSD=X", "deriv_sym":"frxAUDUSD", "stake":10.0, "dec":5, "interval":"1d", "min_score":70, "period":"8mo"},
+ "USDCAD": {"ticker":"USDCAD=X", "deriv_sym":"frxUSDCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":70, "period":"8mo"},
+ "USDCHF": {"ticker":"USDCHF=X", "deriv_sym":"frxUSDCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":70, "period":"8mo"},
+ "EURGBP": {"ticker":"EURGBP=X", "deriv_sym":"frxEURGBP", "stake":10.0, "dec":5, "interval":"1d", "min_score":70, "period":"8mo"},
+ "EURJPY": {"ticker":"EURJPY=X", "deriv_sym":"frxEURJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":70, "period":"8mo"},
+ "EURAUD": {"ticker":"EURAUD=X", "deriv_sym":"frxEURAUD", "stake":10.0, "dec":5, "interval":"1d", "min_score":70, "period":"8mo"},
+ "EURCAD": {"ticker":"EURCAD=X", "deriv_sym":"frxEURCAD", "stake":10.0, "dec":5, "interval":"1d", "min_score":70, "period":"8mo"},
+ "EURCHF": {"ticker":"EURCHF=X", "deriv_sym":"frxEURCHF", "stake":10.0, "dec":5, "interval":"1d", "min_score":70, "period":"8mo"},
+ "GBPJPY": {"ticker":"GBPJPY=X", "deriv_sym":"frxGBPJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":70, "period":"8mo"},
+ "GBPAUD": {"ticker":"GBPAUD=X", "deriv_sym":"frxGBPAUD", "stake":10.0, "dec":5, "interval":"1d", "min_score":70, "period":"8mo"},
+ "AUDJPY": {"ticker":"AUDJPY=X", "deriv_sym":"frxAUDJPY", "stake":10.0, "dec":3, "interval":"1d", "min_score":70, "period":"8mo"},
 }
 
 SCRIPT_DIR=os.path.dirname(os.path.abspath(__file__))
@@ -161,12 +159,17 @@ def texto_senal(mejor,abierto):
         "━━━━━━━━━━━━━━━━━━━━",f"🎯 {'COMPRA' if s['direccion']=='BUY' else 'VENTA'} @ {fmt_px(s['precio'], s['dec'])}",f"🛑 SL {fmt_px(s['sl'], s['dec'])} | 🎯 TP {fmt_px(s['tp'], s['dec'])}",f"📐 R:R 1:{rr:.2f} | ATR {fmt_px(s['atr'], s['dec'])}",
         "━━━━━━━━━━━━━━━━━━━━"] + [f"✅ {rz}" for rz in s["razones"]] + [f"✅ Orden Deriv DEMO | Estrategia {s['estrategia']}" if abierto else f"⚠️ Fallo [{s['estrategia']}]"])
 
-def texto_cierre(trade, profit, is_win):
+def texto_cierre(trade, profit, is_win, raw_poc):
     s=trade; emoji="✅" if is_win else "❌"; res="GANADA" if is_win else "PERDIDA"
+    profit_txt = f"{profit:+.2f} USD"
+    if profit==0 and not is_win:
+        buy_price = raw_poc.get("buy_price") or s.get("stake",10)
+        try: profit_txt = f"{-float(buy_price):+.2f} USD (est. SL)"
+        except: profit_txt = f"{profit:+.2f} USD (SL)"
     return "\n".join([
         f"{emoji} <b>CERRADA - {res}</b> | 🧠 {s.get('estrategia','?')} | {s.get('interval','?')}","━━━━━━━━━━━━━━━━━━━━",
         f"📊 {s.get('nombre','?')} {s.get('direccion','?')} @ {fmt_px(s.get('precio',0), s.get('dec',2))}",
-        f"💰 {profit:+.2f} USD ({'TP' if is_win else 'SL'}) | 🆔 {s.get('contract_id','?')} x{s.get('mult','?')}",
+        f"💰 {profit_txt} ({'TP' if is_win else 'SL'}) | 🆔 {s.get('contract_id','?')} x{s.get('mult','?')}",
         f"⏰ {s.get('open_time','?')} → {time.strftime('%Y-%m-%d %H:%M')}",
     ])
 
@@ -238,16 +241,23 @@ def check_closed_trades():
                     try:
                         r=await rpc(ws,{"proposal_open_contract":1,"contract_id":cid},101)
                         if "error" in r:
-                            tg(texto_cierre(tr,0.0,False)+"\n⚠️ P&L no disponible")
+                            remaining.append(tr)
                             continue
                         poc=r.get("proposal_open_contract") or {}
                         is_sold=poc.get("is_sold") or poc.get("is_expired") or False
                         status=poc.get("status")
-                        profit=poc.get("profit")
+                        profit = poc.get("profit")
+                        if profit is None: profit = poc.get("pnl")
+                        if profit is None:
+                            try:
+                                sell = float(poc.get("sell_price") or 0)
+                                buy = float(poc.get("buy_price") or tr.get("stake",10))
+                                if sell>0: profit = sell - buy
+                            except: profit = 0
+                        try: profit_val=float(profit or 0)
+                        except: profit_val=0.0
                         if is_sold or status in ("sold","won","lost"):
-                            try: profit_val=float(profit or 0)
-                            except: profit_val=0.0
-                            tg(texto_cierre(tr,profit_val,profit_val>0))
+                            tg(texto_cierre(tr,profit_val,profit_val>0,poc))
                         else:
                             remaining.append(tr)
                     except: remaining.append(tr)
@@ -273,7 +283,7 @@ def abrir_en_deriv(mejor):
     except Exception as ex: return False,f"Error Deriv: {ex}",None
 
 def ciclo():
-    print(f"🔍 Analizando {len(INSTRUMENTOS)*2} señales (2h) - v11 1 por par, max {MAX_OPEN_TRADES}")
+    print(f"🔍 v14 Analizando {len(INSTRUMENTOS)*2} señales (2h) - MIN_SCORE 70 - 1 por par max {MAX_OPEN_TRADES}")
     check_closed_trades()
     open_trades=load_open_trades()
     print(f" 📂 Abiertas: {len(open_trades)}/{MAX_OPEN_TRADES} -> {[t.get('base') for t in open_trades]}")
@@ -284,23 +294,24 @@ def ciclo():
     if mejor is None:
         print(" Sin datos"); return
     if mejor["confianza"]<mejor["min_score"]:
-        print(f" ⏭️ descartado: {mejor['nombre']} conf {mejor['confianza']} < {mejor['min_score']}")
+        print(f" ⏭️ descartado: {mejor['nombre']} conf {mejor['confianza']} < {mejor['min_score']} [{mejor['estrategia']}] - NO Telegram (filtrado 70)")
         return
     for intento in todos:
         if intento["confianza"] < intento["min_score"]: continue
         if is_symbol_open(intento["base"]):
-            print(f" ⏭️ {intento['nombre']} ya abierto (1 por par), probando siguiente...")
+            print(f" ⏭️ {intento['nombre']} ya abierto (1 por par), siguiente...")
             continue
         print(f"🏆 Intentando: {intento['nombre']} {intento['direccion']} conf {intento['confianza']}/{intento['min_score']} [{intento['estrategia']}]")
         if TRADE_AUTOMATIC:
             tg(f"🚀 <b>Abriendo DEMO...</b>\n{intento['nombre']} {'COMPRA' if intento['direccion']=='BUY' else 'VENTA'}\nEstrategia: <b>{intento['estrategia']}</b> | Conf {intento['confianza']}/{intento['min_score']}")
             ok,salida,cid=abrir_en_deriv(intento)
             print(salida[-800:])
-            if not ok and ("TradingDurationNotAllowed" in salida or "Trading is not offered" in salida or "Invalid symbol" in salida):
-                print(f" ⏭️ {intento['nombre']} no disponible, siguiente...")
+            if not ok and ("TradingDurationNotAllowed" in salida or "Trading is not offered" in salida or "Invalid symbol" in salida or "InvalidContractProposal" in salida or "Unknown contract proposal" in salida or "payout=0" in salida):
+                print(f" ⏭️ {intento['nombre']} propuesta invalida/expirada, probando siguiente...")
                 continue
             if not ok:
-                tg(f"❌ Error abrir [{intento['estrategia']}]:\n<code>{salida[-500:]}</code>")
+                # v14: no spamea error, solo log
+                print(f"❌ Error abrir [{intento['estrategia']}]: {salida[-500:]}")
                 return
             else:
                 if cid: add_open_trade(cid,intento,100,0,0)
@@ -311,7 +322,7 @@ def ciclo():
     print(" ⏭️ Ningun par nuevo disponible")
 
 def main():
-    print(f"✅ Bot v11 1xPAR MAX{MAX_OPEN_TRADES} iniciado. {RUN_INTERVAL_HOURS}h | {len(INSTRUMENTOS)} pares | 60")
+    print(f"✅ Bot v14 MIN_SCORE 70 iniciado. {RUN_INTERVAL_HOURS}h | {len(INSTRUMENTOS)} pares | 70 | 1xPAR max{MAX_OPEN_TRADES}")
     while True:
         try: ciclo()
         except Exception as ex: print("[ciclo]",ex)
