@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BOT v14 - MIN_SCORE 70 + 1 por par hasta 30 + fix P&L + fix proposal
-- Usuario pidio subir de 65 a 70 para filtrar mas y reducir perdidas
-- 14 pares validos multipliers, diario 70, 100x, 2h, 1 por par max 30
+BOT v15 - SOLO NOTIFICA CUANDO REALMENTE ABRE Y CIERRA (fix spam Abriendo)
+- v14 mandaba "Abriendo DEMO..." ANTES de abrir, si fallaba la propuesta (payout=0) quedaba spam cada 2h sin SEÑAL ABIERTA
+- v15: solo manda SEÑAL ABIERTA cuando contract_id existe, y CERRADA cuando cierra
+- Mantiene: 14 pares validos, diario 70, 100x, 2h, 1 por par max 30, fix P&L+proposal
 """
 import os, sys, time, json, subprocess, requests, pandas as pd, yfinance as yf
 
@@ -152,12 +153,12 @@ def elegir_mejor():
     return validos_sorted[0], validos_sorted
 
 def fmt_px(v,d): return f"{v:,.{d}f}"
-def texto_senal(mejor,abierto):
+def texto_senal(mejor):
     s=mejor; riesgo=abs(s["precio"]-s["sl"]); benef=abs(s["tp"]-s["precio"]); rr=round(benef/riesgo,2) if riesgo else 0
     return "\n".join([
         f"🚀 <b>SEÑAL ABIERTA - {s['nombre']}</b>",f"🧠 Estrategia: <b>{s['estrategia']}</b> | {s['interval']} | Conf {s['confianza']}/{s['min_score']}",
         "━━━━━━━━━━━━━━━━━━━━",f"🎯 {'COMPRA' if s['direccion']=='BUY' else 'VENTA'} @ {fmt_px(s['precio'], s['dec'])}",f"🛑 SL {fmt_px(s['sl'], s['dec'])} | 🎯 TP {fmt_px(s['tp'], s['dec'])}",f"📐 R:R 1:{rr:.2f} | ATR {fmt_px(s['atr'], s['dec'])}",
-        "━━━━━━━━━━━━━━━━━━━━"] + [f"✅ {rz}" for rz in s["razones"]] + [f"✅ Orden Deriv DEMO | Estrategia {s['estrategia']}" if abierto else f"⚠️ Fallo [{s['estrategia']}]"])
+        "━━━━━━━━━━━━━━━━━━━━"] + [f"✅ {rz}" for rz in s["razones"]] + [f"✅ Orden Deriv DEMO x100 | {s['estrategia']}"])
 
 def texto_cierre(trade, profit, is_win, raw_poc):
     s=trade; emoji="✅" if is_win else "❌"; res="GANADA" if is_win else "PERDIDA"
@@ -283,7 +284,7 @@ def abrir_en_deriv(mejor):
     except Exception as ex: return False,f"Error Deriv: {ex}",None
 
 def ciclo():
-    print(f"🔍 v14 Analizando {len(INSTRUMENTOS)*2} señales (2h) - MIN_SCORE 70 - 1 por par max {MAX_OPEN_TRADES}")
+    print(f"🔍 v15 Analizando {len(INSTRUMENTOS)*2} señales (2h) - MIN_SCORE 70 - SOLO ABRE/CIERRA")
     check_closed_trades()
     open_trades=load_open_trades()
     print(f" 📂 Abiertas: {len(open_trades)}/{MAX_OPEN_TRADES} -> {[t.get('base') for t in open_trades]}")
@@ -294,7 +295,7 @@ def ciclo():
     if mejor is None:
         print(" Sin datos"); return
     if mejor["confianza"]<mejor["min_score"]:
-        print(f" ⏭️ descartado: {mejor['nombre']} conf {mejor['confianza']} < {mejor['min_score']} [{mejor['estrategia']}] - NO Telegram (filtrado 70)")
+        print(f" ⏭️ descartado: {mejor['nombre']} conf {mejor['confianza']} < {mejor['min_score']} [{mejor['estrategia']}] - sin Telegram")
         return
     for intento in todos:
         if intento["confianza"] < intento["min_score"]: continue
@@ -303,26 +304,25 @@ def ciclo():
             continue
         print(f"🏆 Intentando: {intento['nombre']} {intento['direccion']} conf {intento['confianza']}/{intento['min_score']} [{intento['estrategia']}]")
         if TRADE_AUTOMATIC:
-            tg(f"🚀 <b>Abriendo DEMO...</b>\n{intento['nombre']} {'COMPRA' if intento['direccion']=='BUY' else 'VENTA'}\nEstrategia: <b>{intento['estrategia']}</b> | Conf {intento['confianza']}/{intento['min_score']}")
+            # v15: NO manda "Abriendo DEMO..." antes, solo si realmente abre
             ok,salida,cid=abrir_en_deriv(intento)
             print(salida[-800:])
             if not ok and ("TradingDurationNotAllowed" in salida or "Trading is not offered" in salida or "Invalid symbol" in salida or "InvalidContractProposal" in salida or "Unknown contract proposal" in salida or "payout=0" in salida):
-                print(f" ⏭️ {intento['nombre']} propuesta invalida/expirada, probando siguiente...")
+                print(f" ⏭️ {intento['nombre']} propuesta invalida/expirada, probando siguiente sin Telegram...")
                 continue
             if not ok:
-                # v14: no spamea error, solo log
-                print(f"❌ Error abrir [{intento['estrategia']}]: {salida[-500:]}")
+                print(f"❌ Error abrir [{intento['estrategia']}]: {salida[-500:]} - sin Telegram")
                 return
             else:
                 if cid: add_open_trade(cid,intento,100,0,0)
                 else: add_open_trade(f"TEMP-{int(time.time())}",intento,100,0,0)
-                tg(texto_senal(intento,True))
-                print(f"✅ Señal enviada {intento['nombre']}")
+                tg(texto_senal(intento))
+                print(f"✅ Señal enviada {intento['nombre']} - Telegram solo abre")
                 return
     print(" ⏭️ Ningun par nuevo disponible")
 
 def main():
-    print(f"✅ Bot v14 MIN_SCORE 70 iniciado. {RUN_INTERVAL_HOURS}h | {len(INSTRUMENTOS)} pares | 70 | 1xPAR max{MAX_OPEN_TRADES}")
+    print(f"✅ Bot v15 SOLO ABRE/CIERRA iniciado. {RUN_INTERVAL_HOURS}h | {len(INSTRUMENTOS)} pares | 70 | 1xPAR max{MAX_OPEN_TRADES}")
     while True:
         try: ciclo()
         except Exception as ex: print("[ciclo]",ex)
