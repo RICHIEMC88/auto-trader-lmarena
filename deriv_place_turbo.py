@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Ejecuta TURBO Rise/Fall 5m en DERIV
-Contract: CALL (Rise) / PUT (Fall), duracion 5m
+Ejecuta TURBO Rise/Fall en DERIV - FIX 2026-10-15: symbol -> underlying_symbol
+Contract: CALL (Rise) / PUT (Fall), duracion 1h para R_75
 """
 import asyncio, json, os, time, urllib.error, urllib.request
 try:
@@ -82,6 +82,7 @@ async def place_order():
     print(f"   stake: {STAKE} USD {DURATION}{DURATION_UNIT}")
     if not API_TOKEN or not APP_ID: fail("Falta TOKEN/APP_ID")
     ws_url=get_demo_otp_ws()
+    # FIX 2026: symbol -> underlying_symbol (breaking change Deriv New API)
     proposal={
         "proposal":1,
         "amount":STAKE,
@@ -90,26 +91,26 @@ async def place_order():
         "currency":"USD",
         "duration":DURATION,
         "duration_unit":DURATION_UNIT,
-        "symbol":SYMBOL,
+        "underlying_symbol":SYMBOL,
     }
     async with websockets.connect(ws_url,open_timeout=20,close_timeout=5) as ws:
         print("✅ WS conectado!")
         r=await rpc(ws,proposal,2)
         if "error" in r:
-            fail(f"proposal: {r['error'].get('code')} — {r['error'].get('message')}")
+            fail(f"proposal: {r['error'].get('code')} — {r['error'].get('message')} — {r['error']}")
         prop=r.get("proposal",{})
         pid=prop.get("id")
         payout=prop.get("payout","?")
         spot=prop.get("spot","?")
         print(f"✅ Cotizacion turbo: id={pid} payout={payout} spot={spot}")
         if not pid or payout==0 or payout=="0":
-            fail(f"Invalid proposal payout=0")
+            fail(f"Invalid proposal payout=0 id={pid} spot={spot}")
         r=await rpc(ws,{"buy":pid,"price":STAKE},3)
         if "error" in r:
             fail(f"buy: {r['error'].get('code')} — {r['error'].get('message')}")
         b=r.get("buy",{})
         cid=b.get("contract_id")
-        print(f"🚀 TURBO EJECUTADO (DEMO): {SYMBOL} {contract} {STAKE} USD cid={cid}")
+        print(f"🚀 TURBO EJECUTADO (DEMO): {SYMBOL} {contract} {STAKE} USD cid={cid} | contract_id={cid}")
 
 def main():
     try: asyncio.run(place_order())
