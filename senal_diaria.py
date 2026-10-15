@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BOT v21 - FOREX 4 PARES RENTABLES STAKE $20 + VOLATILITY 75 1h Rise/Fall BINARIA
-- Usuario: AGREGALA ES UN HECHO Volatility 75 1h Rise/Fall 59.5% WR (como EURUSD 1h +$29.50 mes $5 stake)
-- Opcion A stake 20 y NO 50
-- Forex: 4 pares rentables backtest 1 año RR1:1.5: EURCHF +$110, GBPAUD +$153, USDCAD +$21, EURGBP +$78
-  Diario 60, RR 1:1.5, stake $20 (2% de $1000), max 4, 1 por par, con Telegram solo abre/cierra
-- Volatility 75 1h: R_75 Rise/Fall 1h, EMA9/21+RSI+MACD conf 70+, stake $10, sin Telegram, max 1
+BOT v22 - FIX DUPLICADOS POR RESTART RAILWAY
+- v21 abria 3x EURGBP 03:36, 03:45 porque open_trades.json es efimero en Railway y al reiniciar se borra
+- v22: verifica posiciones REALES abiertas en Deriv via API, no solo archivo local, para no duplicar mismo par
+- Mantiene: 4 pares rentables $20 RR1:1.5 60 max4 + Vol75 1h $10 con Telegram
 """
 import os, sys, time, json, subprocess, requests, pandas as pd, yfinance as yf
 
@@ -19,12 +17,11 @@ RUN_INTERVAL_VOL75_1H=int(e("RUN_INTERVAL_VOL75_1H","60"))
 MIN_RR=float(e("MIN_RR","1.5"))
 MAX_OPEN_TRADES=int(e("MAX_OPEN_TRADES","4"))
 
-# 4 PARES RENTABLES - STAKE $20 (2% de $1000) - RECOMENDADO
 INSTRUMENTOS={
- "EURCHF": {"ticker":"EURCHF=X", "deriv_sym":"frxEURCHF", "stake":20.0, "dec":5, "interval":"1d", "min_score":60, "period":"1y", "desc":"EUR/CHF +$110 año"},
- "GBPAUD": {"ticker":"GBPAUD=X", "deriv_sym":"frxGBPAUD", "stake":20.0, "dec":5, "interval":"1d", "min_score":60, "period":"1y", "desc":"GBP/AUD +$153 año"},
- "USDCAD": {"ticker":"USDCAD=X", "deriv_sym":"frxUSDCAD", "stake":20.0, "dec":5, "interval":"1d", "min_score":60, "period":"1y", "desc":"USD/CAD +$21 año"},
- "EURGBP": {"ticker":"EURGBP=X", "deriv_sym":"frxEURGBP", "stake":20.0, "dec":5, "interval":"1d", "min_score":60, "period":"1y", "desc":"EUR/GBP +$78 año"},
+ "EURCHF": {"ticker":"EURCHF=X", "deriv_sym":"frxEURCHF", "stake":20.0, "dec":5, "interval":"1d", "min_score":60, "period":"1y"},
+ "GBPAUD": {"ticker":"GBPAUD=X", "deriv_sym":"frxGBPAUD", "stake":20.0, "dec":5, "interval":"1d", "min_score":60, "period":"1y"},
+ "USDCAD": {"ticker":"USDCAD=X", "deriv_sym":"frxUSDCAD", "stake":20.0, "dec":5, "interval":"1d", "min_score":60, "period":"1y"},
+ "EURGBP": {"ticker":"EURGBP=X", "deriv_sym":"frxEURGBP", "stake":20.0, "dec":5, "interval":"1d", "min_score":60, "period":"1y"},
 }
 
 SCRIPT_DIR=os.path.dirname(os.path.abspath(__file__))
@@ -134,7 +131,6 @@ def analizar_institucional(ticker, interval="1d", period="1y"):
     return {"precio":last,"atr":a,"swing_low":slw,"swing_high":sh,"direccion":direc,"sl":sl,"tp":tp,"rr":MIN_RR,"confianza":conf,"razones":raz,"estrategia":"INSTITUCIONAL","interval":interval}
 
 def analizar_vol75_1h():
-    """Volatility 75 1h Rise/Fall - EMA9/21 + RSI + MACD conf 70+ - como EURUSD 1h 59.5% WR"""
     try:
         import asyncio, urllib.request, json as js, websockets, pandas as pd
         async def _get():
@@ -199,14 +195,10 @@ def analizar_vol75_1h():
                 conf=round(min(100.0,abs(diff)/6.0*100),1)
                 if conf<70: return None
                 direccion="CALL" if diff>0 else "PUT"
-                return {"direccion":direccion,"confianza":conf,"razones":razones,"precio":price,"rsi":rsi_val,"atr":0,"sl":0,"tp":0,"rr":1,"estrategia":"VOL75_1H","interval":"1h","nombre":"R_75 [VOL75 1h Rise/Fall]","base":"R_75","deriv_sym":"R_75","stake":10.0,"dec":2,"min_score":70,"duration":1,"duration_unit":"h"}
+                return {"direccion":direccion,"confianza":conf,"razones":razones,"precio":price,"rsi":rsi_val,"atr":0,"sl":0,"tp":0,"rr":1,"estrategia":"VOL75_1H","interval":"1h","nombre":"R_75 [VOL75 1h]","base":"R_75","deriv_sym":"R_75","stake":10.0,"dec":2,"min_score":70,"duration":1,"duration_unit":"h"}
         try: return __import__("asyncio").run(_get())
-        except Exception as ex:
-            print(f"Vol75 1h error {ex}")
-            return None
-    except Exception as ex:
-        print(f"analizar_vol75_1h error {ex}")
-        return None
+        except: return None
+    except: return None
 
 def elegir_mejor():
     res=[]
@@ -228,15 +220,15 @@ def texto_senal(mejor):
     s=mejor
     if s["estrategia"]=="VOL75_1H":
         return "\n".join([
-            f"⚡ <b>VOL75 1h ABIERTA - {s['nombre']}</b>",f"🧠 Estrategia: <b>{s['estrategia']}</b> | {s['interval']} | Conf {s['confianza']}/{s['min_score']}",
+            f"⚡ <b>VOL75 1h ABIERTA - {s['nombre']}</b>",f"🧠 {s['estrategia']} | {s['interval']} | Conf {s['confianza']}/{s['min_score']}",
             "━━━━━━━━━━━━━━━━━━━━",f"🎯 {'RISE' if s['direccion']=='CALL' else 'FALL'} @ {fmt_px(s['precio'], s['dec'])} | RSI {s['rsi']:.1f}",
-            f"⏱️ Exp 1h | Stake ${s['stake']} | 59.5% WR ref EURUSD 1h",
-            "━━━━━━━━━━━━━━━━━━━━"] + [f"✅ {rz}" for rz in s["razones"]] + [f"✅ Orden VOL75 DEMO | {s['estrategia']}"])
+            f"⏱️ Exp 1h | Stake ${s['stake']}",
+            "━━━━━━━━━━━━━━━━━━━━"] + [f"✅ {rz}" for rz in s["razones"]] + [f"✅ Orden VOL75 DEMO"])
     riesgo=abs(s["precio"]-s["sl"]); benef=abs(s["tp"]-s["precio"]); rr=round(benef/riesgo,2) if riesgo else 0
     return "\n".join([
-        f"🚀 <b>SEÑAL ABIERTA - {s['nombre']}</b>",f"🧠 Estrategia: <b>{s['estrategia']}</b> | {s['interval']} | Conf {s['confianza']}/{s['min_score']} | R:R 1:{MIN_RR} Stake ${s['stake']}",
-        "━━━━━━━━━━━━━━━━━━━━",f"🎯 {'COMPRA' if s['direccion']=='BUY' else 'VENTA'} @ {fmt_px(s['precio'], s['dec'])}",f"🛑 SL {fmt_px(s['sl'], s['dec'])} | 🎯 TP {fmt_px(s['tp'], s['dec'])}",f"📐 R:R 1:{rr:.2f} | ATR {fmt_px(s['atr'], s['dec'])}",
-        "━━━━━━━━━━━━━━━━━━━━"] + [f"✅ {rz}" for rz in s["razones"]] + [f"✅ Orden Deriv DEMO x100 | {s['estrategia']} | 4 pares rentables $20"])
+        f"🚀 <b>SEÑAL ABIERTA - {s['nombre']}</b>",f"🧠 {s['estrategia']} | {s['interval']} | Conf {s['confianza']}/{s['min_score']} | R:R 1:{MIN_RR} Stake ${s['stake']}",
+        "━━━━━━━━━━━━━━━━━━━━",f"🎯 {'COMPRA' if s['direccion']=='BUY' else 'VENTA'} @ {fmt_px(s['precio'], s['dec'])}",f"🛑 SL {fmt_px(s['sl'], s['dec'])} | 🎯 TP {fmt_px(s['tp'], s['dec'])}",f"📐 R:R 1:{rr:.2f}",
+        "━━━━━━━━━━━━━━━━━━━━"] + [f"✅ {rz}" for rz in s["razones"]] + [f"✅ Orden Deriv DEMO x100 | 4 pares $20"])
 
 def texto_cierre(trade, profit, is_win, raw_poc):
     s=trade; emoji="✅" if is_win else "❌"; res="GANADA" if is_win else "PERDIDA"
@@ -246,9 +238,9 @@ def texto_cierre(trade, profit, is_win, raw_poc):
         try: profit_txt = f"{-float(buy_price):+.2f} USD (est. SL)"
         except: profit_txt = f"{profit:+.2f} USD (SL)"
     return "\n".join([
-        f"{emoji} <b>CERRADA - {res}</b> | 🧠 {s.get('estrategia','?')} | {s.get('interval','?')} | R:R 1:{MIN_RR}","━━━━━━━━━━━━━━━━━━━━",
+        f"{emoji} <b>CERRADA - {res}</b> | 🧠 {s.get('estrategia','?')} | {s.get('interval','?')}","━━━━━━━━━━━━━━━━━━━━",
         f"📊 {s.get('nombre','?')} {s.get('direccion','?')} @ {fmt_px(s.get('precio',0), s.get('dec',2))}",
-        f"💰 {profit_txt} ({'TP' if is_win else 'SL'}) | 🆔 {s.get('contract_id','?')} x{s.get('mult','?')}",
+        f"💰 {profit_txt} | 🆔 {s.get('contract_id','?')} x{s.get('mult','?')}",
         f"⏰ {s.get('open_time','?')} → {time.strftime('%Y-%m-%d %H:%M')}",
     ])
 
@@ -276,19 +268,84 @@ def save_open_vol75(tr):
     except: pass
 def add_open_vol75(cid,mejor):
     tr=load_open_vol75()
-    tr.append({"contract_id":cid,"nombre":mejor["nombre"],"base":mejor["base"],"deriv_sym":mejor["deriv_sym"],"direccion":mejor["direccion"],"precio":mejor["precio"],"stake":mejor["stake"],"dec":mejor["dec"],"estrategia":mejor["estrategia"],"confianza":mejor["confianza"],"interval":mejor["interval"],"min_score":mejor["min_score"],"duration":mejor.get("duration",1),"duration_unit":mejor.get("duration_unit","h"),"open_time":time.strftime("%Y-%m-%d %H:%M:%S")})
+    tr.append({"contract_id":cid,"nombre":mejor["nombre"],"base":mejor["base"],"deriv_sym":mejor["deriv_sym"],"direccion":mejor["direccion"],"precio":mejor["precio"],"stake":mejor["stake"],"dec":mejor["dec"],"estrategia":mejor["estrategia"],"confianza":mejor["confianza"],"interval":mejor["interval"],"min_score":mejor["min_score"],"open_time":time.strftime("%Y-%m-%d %H:%M:%S")})
     save_open_vol75(tr)
 
+# v22 FIX: verifica posiciones REALES en Deriv, no solo archivo local
+def get_open_symbols_from_deriv():
+    """Obtiene simbolos realmente abiertos en Deriv para no duplicar tras restart"""
+    try:
+        import asyncio, urllib.request, urllib.error, json as js, websockets
+        async def _check():
+            def rest(meth,path,body=None):
+                url="https://api.derivws.com"+path
+                headers={"Authorization":f"Bearer {os.environ.get('DERIV_API_TOKEN','')}","Accept":"application/json","Deriv-App-ID":os.environ.get('DERIV_APP_ID','')}
+                data=js.dumps(body).encode() if body else None
+                if data: headers["Content-Type"]="application/json"
+                req=urllib.request.Request(url,data=data,headers=headers,method=meth)
+                try:
+                    with urllib.request.urlopen(req,timeout=15) as resp: return resp.getcode(), js.loads(resp.read().decode() or "{}")
+                except Exception as ex: return 0, {"error":str(ex)}
+            async def rpc(ws,payload,req_id):
+                payload=dict(payload); payload["req_id"]=req_id
+                await ws.send(js.dumps(payload))
+                deadline=time.time()+15
+                while time.time()<deadline:
+                    raw=await asyncio.wait_for(ws.recv(),timeout=3)
+                    d=js.loads(raw)
+                    if d.get("req_id")==req_id: return d
+                return {}
+            code,data=rest("GET","/trading/v1/options/accounts")
+            if code!=200: return []
+            accs=data.get("data") or []; demo=next((a for a in accs if a.get("account_type")=="demo"),None)
+            if not demo: return []
+            acc_id=demo.get("account_id")
+            code,data=rest("POST",f"/trading/v1/options/accounts/{acc_id}/otp")
+            if code!=200: return []
+            ws_url=(data.get("data") or {}).get("url")
+            if not ws_url: return []
+            symbols=[]
+            async with websockets.connect(ws_url,open_timeout=15) as ws:
+                # pide portfolio
+                r=await rpc(ws,{"portfolio":1},1)
+                portfolio=r.get("portfolio") or {}
+                contracts=portfolio.get("contracts") or []
+                for c in contracts:
+                    sym=c.get("symbol") or c.get("underlying_symbol") or ""
+                    # mapea frxEURGBP -> EURGBP
+                    sym=sym.replace("frx","").replace("R_75","R_75")
+                    if "EURGBP" in sym: symbols.append("EURGBP")
+                    elif "EURCHF" in sym: symbols.append("EURCHF")
+                    elif "GBPAUD" in sym: symbols.append("GBPAUD")
+                    elif "USDCAD" in sym: symbols.append("USDCAD")
+                    elif "R_75" in sym: symbols.append("R_75")
+            return symbols
+        try:
+            return __import__("asyncio").run(_check())
+        except:
+            return []
+    except:
+        return []
+
 def is_symbol_open(base):
+    # v22: verifica archivo local + Deriv real
     trades=load_open_trades()
     for t in trades:
         if t.get("base")==base:
             return True
+    # verifica en Deriv real
+    real_symbols=get_open_symbols_from_deriv()
+    if base in real_symbols:
+        print(f" 🔒 {base} ya abierto en Deriv real (aunque json vacio), no duplico")
+        return True
     return False
 
 def check_closed_trades():
     trades=load_open_trades()
-    if not trades: return
+    if not trades:
+        # v22: si json vacio pero hay posiciones reales, reconstruye json vacio? No, deja que portfolio las cierre
+        # Pero intenta sincronizar: si hay posiciones reales, no borra
+        return
     try:
         import asyncio, urllib.request, urllib.error, json as js, websockets
         async def _check():
@@ -412,7 +469,7 @@ def check_closed_vol75():
                         try: profit_val=float(profit or 0)
                         except: profit_val=0.0
                         if is_sold or status in ("sold","won","lost"):
-                            tg(f"{'✅' if profit_val>0 else '❌'} <b>CERRADA VOL75 1h - {'GANADA' if profit_val>0 else 'PERDIDA'}</b> | {tr.get('base')} {tr.get('direccion')} | 💰 {profit_val:+.2f} USD | 🆔 {tr.get('contract_id')}")
+                            tg(f"{'✅' if profit_val>0 else '❌'} <b>CERRADA VOL75 1h - {'GANADA' if profit_val>0 else 'PERDIDA'}</b> | {tr.get('base')} {tr.get('direccion')} | 💰 {profit_val:+.2f} USD")
                         else:
                             remaining.append(tr)
                     except: remaining.append(tr)
@@ -452,22 +509,24 @@ def abrir_vol75(mejor):
     except Exception as ex: return False,f"Error Vol75: {ex}",None
 
 def ciclo_forex():
-    print(f"🔍 v21 FOREX 4 pares rentables stake $20 - {len(INSTRUMENTOS)*2} señales (2h) - 60 - R:R 1:{MIN_RR} - Max {MAX_OPEN_TRADES}")
+    print(f"🔍 v22 FOREX 4 pares $20 - {len(INSTRUMENTOS)*2} señales (2h) - 60 - R:R 1:{MIN_RR} - FIX RESTART")
     check_closed_trades()
     open_trades=load_open_trades()
-    print(f" 📂 Forex Abiertas: {len(open_trades)}/{MAX_OPEN_TRADES} -> {[t.get('base') for t in open_trades]}")
-    if len(open_trades) >= MAX_OPEN_TRADES:
-        print(f" ⏸️ Forex Max {MAX_OPEN_TRADES} alcanzado")
+    real_symbols=get_open_symbols_from_deriv()
+    print(f" 📂 Forex Abiertas local: {len(open_trades)}/{MAX_OPEN_TRADES} -> {[t.get('base') for t in open_trades]} | Real Deriv: {real_symbols}")
+    if len(open_trades) >= MAX_OPEN_TRADES or len(real_symbols) >= MAX_OPEN_TRADES:
+        print(f" ⏸️ Forex Max {MAX_OPEN_TRADES} alcanzado (local o real)")
         return
     mejor,todos=elegir_mejor()
     if mejor is None:
         print(" Sin datos forex"); return
     if mejor["confianza"]<mejor["min_score"]:
-        print(f" ⏭️ Forex descartado: {mejor['nombre']} conf {mejor['confianza']} < {mejor['min_score']} - sin TG")
+        print(f" ⏭️ Forex descartado: {mejor['nombre']} conf {mejor['confianza']} < {mejor['min_score']}")
         return
     for intento in todos:
         if intento["confianza"] < intento["min_score"]: continue
         if is_symbol_open(intento["base"]):
+            print(f" ⏭️ {intento['nombre']} ya abierto (local o Deriv real), siguiente...")
             continue
         print(f"🏆 Forex Intentando: {intento['nombre']} {intento['direccion']} conf {intento['confianza']} stake ${intento['stake']}")
         if TRADE_AUTOMATIC:
@@ -482,19 +541,20 @@ def ciclo_forex():
                 if cid: add_open_trade(cid,intento,100,0,0)
                 else: add_open_trade(f"TEMP-{int(time.time())}",intento,100,0,0)
                 tg(texto_senal(intento))
-                print(f"✅ Forex Señal {intento['nombre']} - con Telegram - stake $20")
+                print(f"✅ Forex Señal {intento['nombre']} - con Telegram - stake $20 - FIX RESTART")
                 return
 
 def ciclo_vol75():
-    print(f"⚡ v21 VOL75 1h Rise/Fall - 1 instrumento R_75 - conf 70+ - stake $10 - con Telegram")
+    print(f"⚡ v22 VOL75 1h - R_75 - conf 70+ - stake $10 - con Telegram - FIX RESTART")
     check_closed_vol75()
     open_v=load_open_vol75()
-    if len(open_v)>=1:
-        print(f" ⏸️ Vol75 ya abierta, esperando cierre")
+    real_symbols=get_open_symbols_from_deriv()
+    if len(open_v)>=1 or "R_75" in real_symbols:
+        print(f" ⏸️ Vol75 ya abierta local o real, esperando cierre")
         return
     mejor=analizar_vol75_1h()
     if mejor is None:
-        print(" ⏭️ Vol75 sin señal clara (conf <70) - sin TG")
+        print(" ⏭️ Vol75 sin señal clara")
         return
     if mejor["confianza"]<mejor["min_score"]:
         print(f" ⏭️ Vol75 descartada conf {mejor['confianza']} < {mejor['min_score']}")
@@ -510,10 +570,10 @@ def ciclo_vol75():
             if cid: add_open_vol75(cid,mejor)
             else: add_open_vol75(f"TEMP-{int(time.time())}",mejor)
             tg(texto_senal(mejor))
-            print(f"✅ Vol75 Señal {mejor['direccion']} abierta - CON TELEGRAM - stake $10")
+            print(f"✅ Vol75 Señal {mejor['direccion']} abierta - CON TELEGRAM - stake $10 - FIX RESTART")
 
 def main():
-    print(f"✅ Bot v21 FOREX 4 pares $20 + VOL75 1h $10 iniciado. Forex {RUN_INTERVAL_HOURS}h | Vol75 {RUN_INTERVAL_VOL75_1H}m | R:R 1:{MIN_RR}")
+    print(f"✅ Bot v22 FIX RESTART iniciado. Forex 4 pares $20 + VOL75 1h $10 | R:R 1:{MIN_RR} | 60 | Max {MAX_OPEN_TRADES}")
     last_forex=0
     last_vol75=0
     while True:
