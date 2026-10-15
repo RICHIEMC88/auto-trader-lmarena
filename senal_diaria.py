@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BOT v24 - FIX DEFINITIVO REAL DERIV + COOLDOWN
-- Problema v23: last_open.json también es efímero en Railway, se borra en cada restart igual que open_trades.json -> sigue 4x EURGBP 03:41,03:45,03:58,04:01
-- v24: Consulta posiciones REALES abiertas en Deriv via REST + WS portfolio antes de abrir, + cooldown en memoria + local
-- Mantiene: 4 pares $20 RR1:1.5 max4 60 + Vol75 1h $10
+BOT v25 - FIX TURBO SYMBOL underlying_symbol + v24 FIX REAL DERIV
+- v24 tenia error Vol75: InputValidationFailed symbol, underlying_symbol porque deriv_place_turbo.py usaba "symbol" viejo
+- Deriv New API 2026 cambio symbol -> underlying_symbol (breaking change)
+- v25: usa deriv_place_turbo_FIXED.py con underlying_symbol
+- Mantiene: 4 pares $20 RR1:1.5 60 max4 + Vol75 1h $10 FIX REAL
 """
 import os, sys, time, json, subprocess, requests, pandas as pd, yfinance as yf
 
@@ -26,8 +27,15 @@ INSTRUMENTOS={
 }
 
 SCRIPT_DIR=os.path.dirname(os.path.abspath(__file__))
+# FIX: usa FIXED si existe, si no el normal
 PLACE_MULT_SCRIPT=os.path.join(SCRIPT_DIR,"deriv_place_signal.py")
+if not os.path.exists(PLACE_MULT_SCRIPT):
+    PLACE_MULT_SCRIPT=os.path.join(SCRIPT_DIR,"deriv_place_signal_FIXED.py")
 PLACE_TURBO_SCRIPT=os.path.join(SCRIPT_DIR,"deriv_place_turbo.py")
+# Si existe FIXED, usalo (con underlying_symbol fix)
+if os.path.exists(os.path.join(SCRIPT_DIR,"deriv_place_turbo_FIXED.py")):
+    PLACE_TURBO_SCRIPT=os.path.join(SCRIPT_DIR,"deriv_place_turbo_FIXED.py")
+
 OPEN_TRADES_FILE=os.path.join(SCRIPT_DIR,"open_trades.json")
 OPEN_VOL75_FILE=os.path.join(SCRIPT_DIR,"open_vol75.json")
 LAST_OPEN_FILE=os.path.join(SCRIPT_DIR,"last_open.json")
@@ -283,9 +291,7 @@ def save_last_open(data):
         with open(LAST_OPEN_FILE,"w") as f: json.dump(data,f,indent=2)
     except: pass
 
-# ===== FIX REAL DERIV - CONSULTA POSICIONES REALES ABIERTAS =====
 def get_open_symbols_from_deriv():
-    """Consulta Deriv real via portfolio y retorna lista de bases abiertas ej ['EURGBP','R_75']"""
     try:
         import asyncio, urllib.request, json as js, websockets
         async def _get():
@@ -321,25 +327,20 @@ def get_open_symbols_from_deriv():
                 r=await rpc(ws,{"portfolio":1},1)
                 portfolio=r.get("portfolio") or {}
                 contracts=portfolio.get("contracts") or []
-                # contracts puede ser lista directa o dict
                 if isinstance(contracts, dict):
                     contracts = list(contracts.values())
                 for c in contracts:
                     if not isinstance(c, dict): continue
-                    # ignora vendidas
                     if c.get("is_sold") or c.get("is_expired"): continue
                     sym=c.get("symbol") or c.get("underlying_symbol") or ""
-                    # mapea frxEURGBP -> EURGBP
                     for base in ["EURCHF","GBPAUD","USDCAD","EURGBP","R_75","R_100","R_50"]:
                         if base in sym:
                             if base not in symbols:
                                 symbols.append(base)
-                    # tambien chequea longcode
                     lc=c.get("longcode","") or c.get("display_name","")
                     for base in ["EURCHF","GBPAUD","USDCAD","EURGBP","R_75"]:
                         if base in lc and base not in symbols:
                             symbols.append(base)
-                # log para debug
                 print(f" 🔍 Deriv real portfolio: {len(contracts)} contratos, abiertos: {symbols}")
             return symbols
         try: return __import__("asyncio").run(_get())
@@ -351,31 +352,27 @@ def get_open_symbols_from_deriv():
         return []
 
 def is_symbol_open(base):
-    # 1) cooldown local 24h
     last_open=load_last_open()
     now=time.time()
     if base in last_open:
         last_time=last_open[base]
         hours_since=(now-last_time)/3600
         if hours_since<COOLDOWN_HOURS:
-            print(f" ⏸️ {base} cooldown {hours_since:.1f}h < {COOLDOWN_HOURS}h, no abro hasta {COOLDOWN_HOURS-hours_since:.1f}h mas")
+            print(f" ⏸️ {base} cooldown {hours_since:.1f}h < {COOLDOWN_HOURS}h")
             return True
-    # 2) archivo local
     trades=load_open_trades()
     for t in trades:
         if t.get("base")==base:
-            print(f" 🔒 {base} ya abierto local open_trades.json, no duplico")
+            print(f" 🔒 {base} ya abierto local open_trades.json")
             return True
     vol=load_open_vol75()
     for t in vol:
         if t.get("base")==base:
-            print(f" 🔒 {base} ya abierto local open_vol75.json, no duplico")
+            print(f" 🔒 {base} ya abierto local open_vol75.json")
             return True
-    # 3) REAL DERIV - FIX DEFINITIVO
     real_symbols=get_open_symbols_from_deriv()
     if base in real_symbols:
-        print(f" 🔒 {base} YA ABIERTO EN DERIV REAL (aunque json vacio por restart), NO DUPLICO - FIX REAL")
-        # guarda cooldown para no volver a consultar tanto
+        print(f" 🔒 {base} YA ABIERTO EN DERIV REAL, NO DUPLICO - FIX REAL")
         last_open[base]=time.time()
         save_last_open(last_open)
         return True
@@ -547,14 +544,13 @@ def abrir_vol75(mejor):
     except Exception as ex: return False,f"Error Vol75: {ex}",None
 
 def ciclo_forex():
-    print(f"🔍 v24 FOREX 4 pares $20 - {len(INSTRUMENTOS)*2} señales (2h) - 60 - R:R 1:{MIN_RR} - FIX REAL DERIV + COOLDOWN {COOLDOWN_HOURS}h")
+    print(f"🔍 v25 FOREX 4 pares $20 - {len(INSTRUMENTOS)*2} señales (2h) - 60 - R:R 1:{MIN_RR} - FIX REAL DERIV + COOLDOWN {COOLDOWN_HOURS}h")
     check_closed_trades()
     open_trades=load_open_trades()
     print(f" 📂 Forex Abiertas local: {len(open_trades)}/{MAX_OPEN_TRADES} -> {[t.get('base') for t in open_trades]}")
     if len(open_trades) >= MAX_OPEN_TRADES:
         print(f" ⏸️ Forex Max {MAX_OPEN_TRADES} alcanzado local")
         return
-    # Verifica reales tambien para max
     real_symbols=get_open_symbols_from_deriv()
     print(f" 📂 Forex Abiertas REAL Deriv: {real_symbols}")
     if len(real_symbols) >= MAX_OPEN_TRADES:
@@ -591,7 +587,7 @@ def ciclo_forex():
                 return
 
 def ciclo_vol75():
-    print(f"⚡ v24 VOL75 1h - R_75 - conf 70+ - stake $10 - FIX REAL + cooldown")
+    print(f"⚡ v25 VOL75 1h - R_75 - conf 70+ - stake $10 - FIX REAL + underlying_symbol")
     check_closed_vol75()
     open_v=load_open_vol75()
     if len(open_v)>=1:
@@ -628,10 +624,10 @@ def ciclo_vol75():
             last_open["R_75"]=time.time()
             save_last_open(last_open)
             tg(texto_senal(mejor))
-            print(f"✅ Vol75 Señal {mejor['direccion']} abierta - CON TELEGRAM - FIX REAL")
+            print(f"✅ Vol75 Señal {mejor['direccion']} abierta - CON TELEGRAM - FIX underlying_symbol")
 
 def main():
-    print(f"✅ Bot v24 FIX REAL DERIV + COOLDOWN {COOLDOWN_HOURS}h iniciado. Forex 4 pares $20 + VOL75 1h $10 | R:R 1:{MIN_RR} | 60 | Max {MAX_OPEN_TRADES}")
+    print(f"✅ Bot v25 FIX TURBO underlying_symbol + FIX REAL DERIV + COOLDOWN {COOLDOWN_HOURS}h iniciado. Forex 4 pares $20 + VOL75 1h $10 | R:R 1:{MIN_RR} | 60 | Max {MAX_OPEN_TRADES}")
     last_forex=0
     last_vol75=0
     while True:
