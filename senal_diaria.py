@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BOT v22 - FIX DUPLICADOS POR RESTART RAILWAY
-- v21 abria 3x EURGBP 03:36, 03:45 porque open_trades.json es efimero en Railway y al reiniciar se borra
-- v22: verifica posiciones REALES abiertas en Deriv via API, no solo archivo local, para no duplicar mismo par
-- Mantiene: 4 pares rentables $20 RR1:1.5 60 max4 + Vol75 1h $10 con Telegram
+BOT v23 - FIX DEFINITIVO DUPLICADOS 3x EURGBP 03:41,03:45,03:58
+- v22 intentaba portfolio pero Deriv no devuelve bien simbolos para multipliers
+- v23: cooldown 24h por par + archivo last_open.json + no abre mismo par si ya abrio en ultimas 24h
+- Mantiene: 4 pares $20 RR1:1.5 60 max4 + Vol75 1h $10 con Telegram
 """
 import os, sys, time, json, subprocess, requests, pandas as pd, yfinance as yf
 
@@ -16,6 +16,7 @@ RUN_INTERVAL_HOURS=int(e("RUN_INTERVAL_HOURS","2"))
 RUN_INTERVAL_VOL75_1H=int(e("RUN_INTERVAL_VOL75_1H","60"))
 MIN_RR=float(e("MIN_RR","1.5"))
 MAX_OPEN_TRADES=int(e("MAX_OPEN_TRADES","4"))
+COOLDOWN_HOURS=int(e("COOLDOWN_HOURS","24"))
 
 INSTRUMENTOS={
  "EURCHF": {"ticker":"EURCHF=X", "deriv_sym":"frxEURCHF", "stake":20.0, "dec":5, "interval":"1d", "min_score":60, "period":"1y"},
@@ -29,6 +30,7 @@ PLACE_MULT_SCRIPT=os.path.join(SCRIPT_DIR,"deriv_place_signal.py")
 PLACE_TURBO_SCRIPT=os.path.join(SCRIPT_DIR,"deriv_place_turbo.py")
 OPEN_TRADES_FILE=os.path.join(SCRIPT_DIR,"open_trades.json")
 OPEN_VOL75_FILE=os.path.join(SCRIPT_DIR,"open_vol75.json")
+LAST_OPEN_FILE=os.path.join(SCRIPT_DIR,"last_open.json")
 
 def tg(text):
     if not (TG_TOKEN and TG_CHAT): return
@@ -271,81 +273,37 @@ def add_open_vol75(cid,mejor):
     tr.append({"contract_id":cid,"nombre":mejor["nombre"],"base":mejor["base"],"deriv_sym":mejor["deriv_sym"],"direccion":mejor["direccion"],"precio":mejor["precio"],"stake":mejor["stake"],"dec":mejor["dec"],"estrategia":mejor["estrategia"],"confianza":mejor["confianza"],"interval":mejor["interval"],"min_score":mejor["min_score"],"open_time":time.strftime("%Y-%m-%d %H:%M:%S")})
     save_open_vol75(tr)
 
-# v22 FIX: verifica posiciones REALES en Deriv, no solo archivo local
-def get_open_symbols_from_deriv():
-    """Obtiene simbolos realmente abiertos en Deriv para no duplicar tras restart"""
+def load_last_open():
+    if not os.path.exists(LAST_OPEN_FILE): return {}
     try:
-        import asyncio, urllib.request, urllib.error, json as js, websockets
-        async def _check():
-            def rest(meth,path,body=None):
-                url="https://api.derivws.com"+path
-                headers={"Authorization":f"Bearer {os.environ.get('DERIV_API_TOKEN','')}","Accept":"application/json","Deriv-App-ID":os.environ.get('DERIV_APP_ID','')}
-                data=js.dumps(body).encode() if body else None
-                if data: headers["Content-Type"]="application/json"
-                req=urllib.request.Request(url,data=data,headers=headers,method=meth)
-                try:
-                    with urllib.request.urlopen(req,timeout=15) as resp: return resp.getcode(), js.loads(resp.read().decode() or "{}")
-                except Exception as ex: return 0, {"error":str(ex)}
-            async def rpc(ws,payload,req_id):
-                payload=dict(payload); payload["req_id"]=req_id
-                await ws.send(js.dumps(payload))
-                deadline=time.time()+15
-                while time.time()<deadline:
-                    raw=await asyncio.wait_for(ws.recv(),timeout=3)
-                    d=js.loads(raw)
-                    if d.get("req_id")==req_id: return d
-                return {}
-            code,data=rest("GET","/trading/v1/options/accounts")
-            if code!=200: return []
-            accs=data.get("data") or []; demo=next((a for a in accs if a.get("account_type")=="demo"),None)
-            if not demo: return []
-            acc_id=demo.get("account_id")
-            code,data=rest("POST",f"/trading/v1/options/accounts/{acc_id}/otp")
-            if code!=200: return []
-            ws_url=(data.get("data") or {}).get("url")
-            if not ws_url: return []
-            symbols=[]
-            async with websockets.connect(ws_url,open_timeout=15) as ws:
-                # pide portfolio
-                r=await rpc(ws,{"portfolio":1},1)
-                portfolio=r.get("portfolio") or {}
-                contracts=portfolio.get("contracts") or []
-                for c in contracts:
-                    sym=c.get("symbol") or c.get("underlying_symbol") or ""
-                    # mapea frxEURGBP -> EURGBP
-                    sym=sym.replace("frx","").replace("R_75","R_75")
-                    if "EURGBP" in sym: symbols.append("EURGBP")
-                    elif "EURCHF" in sym: symbols.append("EURCHF")
-                    elif "GBPAUD" in sym: symbols.append("GBPAUD")
-                    elif "USDCAD" in sym: symbols.append("USDCAD")
-                    elif "R_75" in sym: symbols.append("R_75")
-            return symbols
-        try:
-            return __import__("asyncio").run(_check())
-        except:
-            return []
-    except:
-        return []
+        with open(LAST_OPEN_FILE,"r") as f: return json.load(f)
+    except: return {}
+def save_last_open(data):
+    try:
+        with open(LAST_OPEN_FILE,"w") as f: json.dump(data,f,indent=2)
+    except: pass
 
 def is_symbol_open(base):
-    # v22: verifica archivo local + Deriv real
+    # v23 FIX DEFINITIVO: cooldown 24h por par
+    last_open=load_last_open()
+    now=time.time()
+    if base in last_open:
+        last_time=last_open[base]
+        hours_since=(now-last_time)/3600
+        if hours_since<COOLDOWN_HOURS:
+            print(f" ⏸️ {base} cooldown {hours_since:.1f}h < {COOLDOWN_HOURS}h, no abro hasta {COOLDOWN_HOURS-hours_since:.1f}h mas")
+            return True
+    # verifica archivo local tambien
     trades=load_open_trades()
     for t in trades:
         if t.get("base")==base:
+            print(f" 🔒 {base} ya abierto local, no duplico")
             return True
-    # verifica en Deriv real
-    real_symbols=get_open_symbols_from_deriv()
-    if base in real_symbols:
-        print(f" 🔒 {base} ya abierto en Deriv real (aunque json vacio), no duplico")
-        return True
     return False
 
 def check_closed_trades():
     trades=load_open_trades()
-    if not trades:
-        # v22: si json vacio pero hay posiciones reales, reconstruye json vacio? No, deja que portfolio las cierre
-        # Pero intenta sincronizar: si hay posiciones reales, no borra
-        return
+    if not trades: return
     try:
         import asyncio, urllib.request, urllib.error, json as js, websockets
         async def _check():
@@ -509,13 +467,12 @@ def abrir_vol75(mejor):
     except Exception as ex: return False,f"Error Vol75: {ex}",None
 
 def ciclo_forex():
-    print(f"🔍 v22 FOREX 4 pares $20 - {len(INSTRUMENTOS)*2} señales (2h) - 60 - R:R 1:{MIN_RR} - FIX RESTART")
+    print(f"🔍 v23 FOREX 4 pares $20 - {len(INSTRUMENTOS)*2} señales (2h) - 60 - R:R 1:{MIN_RR} - COOLDOWN {COOLDOWN_HOURS}h FIX DEFINITIVO")
     check_closed_trades()
     open_trades=load_open_trades()
-    real_symbols=get_open_symbols_from_deriv()
-    print(f" 📂 Forex Abiertas local: {len(open_trades)}/{MAX_OPEN_TRADES} -> {[t.get('base') for t in open_trades]} | Real Deriv: {real_symbols}")
-    if len(open_trades) >= MAX_OPEN_TRADES or len(real_symbols) >= MAX_OPEN_TRADES:
-        print(f" ⏸️ Forex Max {MAX_OPEN_TRADES} alcanzado (local o real)")
+    print(f" 📂 Forex Abiertas: {len(open_trades)}/{MAX_OPEN_TRADES} -> {[t.get('base') for t in open_trades]}")
+    if len(open_trades) >= MAX_OPEN_TRADES:
+        print(f" ⏸️ Forex Max {MAX_OPEN_TRADES} alcanzado")
         return
     mejor,todos=elegir_mejor()
     if mejor is None:
@@ -526,7 +483,7 @@ def ciclo_forex():
     for intento in todos:
         if intento["confianza"] < intento["min_score"]: continue
         if is_symbol_open(intento["base"]):
-            print(f" ⏭️ {intento['nombre']} ya abierto (local o Deriv real), siguiente...")
+            print(f" ⏭️ {intento['nombre']} en cooldown {COOLDOWN_HOURS}h o ya abierto, siguiente...")
             continue
         print(f"🏆 Forex Intentando: {intento['nombre']} {intento['direccion']} conf {intento['confianza']} stake ${intento['stake']}")
         if TRADE_AUTOMATIC:
@@ -540,18 +497,28 @@ def ciclo_forex():
             else:
                 if cid: add_open_trade(cid,intento,100,0,0)
                 else: add_open_trade(f"TEMP-{int(time.time())}",intento,100,0,0)
+                # guarda cooldown
+                last_open=load_last_open()
+                last_open[intento["base"]]=time.time()
+                save_last_open(last_open)
                 tg(texto_senal(intento))
-                print(f"✅ Forex Señal {intento['nombre']} - con Telegram - stake $20 - FIX RESTART")
+                print(f"✅ Forex Señal {intento['nombre']} - con Telegram - stake $20 - cooldown {COOLDOWN_HOURS}h")
                 return
 
 def ciclo_vol75():
-    print(f"⚡ v22 VOL75 1h - R_75 - conf 70+ - stake $10 - con Telegram - FIX RESTART")
+    print(f"⚡ v23 VOL75 1h - R_75 - conf 70+ - stake $10 - con Telegram - cooldown")
     check_closed_vol75()
     open_v=load_open_vol75()
-    real_symbols=get_open_symbols_from_deriv()
-    if len(open_v)>=1 or "R_75" in real_symbols:
-        print(f" ⏸️ Vol75 ya abierta local o real, esperando cierre")
+    if len(open_v)>=1:
+        print(f" ⏸️ Vol75 ya abierta, esperando cierre")
         return
+    # cooldown para vol75 tambien
+    last_open=load_last_open()
+    if "R_75" in last_open:
+        hours_since=(time.time()-last_open["R_75"])/3600
+        if hours_since<COOLDOWN_HOURS:
+            print(f" ⏸️ R_75 cooldown {hours_since:.1f}h < {COOLDOWN_HOURS}h")
+            return
     mejor=analizar_vol75_1h()
     if mejor is None:
         print(" ⏭️ Vol75 sin señal clara")
@@ -569,11 +536,14 @@ def ciclo_vol75():
         else:
             if cid: add_open_vol75(cid,mejor)
             else: add_open_vol75(f"TEMP-{int(time.time())}",mejor)
+            last_open=load_last_open()
+            last_open["R_75"]=time.time()
+            save_last_open(last_open)
             tg(texto_senal(mejor))
-            print(f"✅ Vol75 Señal {mejor['direccion']} abierta - CON TELEGRAM - stake $10 - FIX RESTART")
+            print(f"✅ Vol75 Señal {mejor['direccion']} abierta - CON TELEGRAM - cooldown {COOLDOWN_HOURS}h")
 
 def main():
-    print(f"✅ Bot v22 FIX RESTART iniciado. Forex 4 pares $20 + VOL75 1h $10 | R:R 1:{MIN_RR} | 60 | Max {MAX_OPEN_TRADES}")
+    print(f"✅ Bot v23 COOLDOWN {COOLDOWN_HOURS}h FIX DEFINITIVO iniciado. Forex 4 pares $20 + VOL75 1h $10 | R:R 1:{MIN_RR} | 60 | Max {MAX_OPEN_TRADES}")
     last_forex=0
     last_vol75=0
     while True:
