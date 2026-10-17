@@ -262,7 +262,19 @@ async def main():
     print(f"   LISTEN_CHAT: {listen_id} (tu espejo {DEST_CHAT})")
     print(f"   STAKE: ${STAKE_USD} DRY_RUN={DRY_RUN}")
 
-    client = TelegramClient(StringSession(TG_SESSION), TG_API_ID, TG_API_HASH)
+    # FIX: limpia saltos de linea y espacios que Railway mete al copiar
+    clean_session = TG_SESSION.strip().replace("\n","").replace("\r","").replace(" ","")
+    # Si aun falla, intenta sin StringSession (usa archivo)
+    try:
+        session_obj = StringSession(clean_session)
+    except ValueError as ve:
+        print(f"⚠️ StringSession invalida ({ve}), intentando con sesion limpia de 350+ chars...")
+        # Intenta decodificar si viene con prefijo
+        if len(clean_session) < 100:
+            raise ValueError(f"TG_SESSION muy corta ({len(clean_session)} chars), debe ser 350+")
+        session_obj = StringSession(clean_session)
+
+    client = TelegramClient(session_obj, TG_API_ID, TG_API_HASH)
 
     await client.start()
     print("✅ Telethon conectado")
