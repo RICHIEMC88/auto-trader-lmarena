@@ -225,6 +225,9 @@ async def place_order():
         payout = prop.get("payout", "?")
         spot = prop.get("spot", "?")
         print(f"✅ Cotización: id={pid} | payout={payout} | spot={spot}")
+        # v12 FIX: si payout=0 o pid vacio, la propuesta es invalida (precio movido / SL no valido)
+        if not pid or payout==0 or payout=="0":
+            fail(f"buy: InvalidContractProposal - Unknown contract proposal (payout=0 id={pid} spot={spot}) - propuesta expirada o SL/TP no valido")
 
         r = await rpc(ws, {"buy": pid, "price": STAKE}, 3)
         if "error" in r:
