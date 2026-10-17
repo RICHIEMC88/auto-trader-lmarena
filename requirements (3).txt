@@ -1,0 +1,6 @@
+yfinance
+pandas
+requests
+websockets
+telethon
+python-dotenv
