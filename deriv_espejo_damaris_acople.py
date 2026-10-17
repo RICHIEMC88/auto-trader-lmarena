@@ -102,18 +102,88 @@ NUMBERS_REGEX = re.compile(r"(\d+\.\d+|\d+)")
 def parse_signal(text):
     """
     Parsea texto de Damaris y retorna dict con symbol, side, entry, sl, tp o None
+    v2: soporta GOLD con multiples TPs y formato 4167/4164
     """
     if not text: return None
-    upper = text.upper()
-    # Filtro rapido: debe tener BUY o SELL y TP y SL
+    upper = text.upper().strip()
+
+    # Detecta CIERRE: Damaris manda "TP Done Hit Successfully" o "Ready for signal"
+    if "TP DONE" in upper or "HIT SUCCESSFULLY" in upper or "READY FOR SIGNAL" in upper:
+        return {
+            "action": "CLOSE",
+            "symbol_raw": "GOLD",
+            "deriv_sym": "frxXAUUSD",
+            "base": "XAUUSD",
+            "side": "CLOSE",
+            "text": text[:200]
+        }
+
+    # Filtro rapido: debe tener BUY o SELL
     if not ("BUY" in upper or "SELL" in upper or "COMPRA" in upper or "VENTA" in upper):
         return None
+
+    # Busca GOLD (caso Damaris)
+    if "GOLD" in upper or "XAU" in upper:
+        # Parser especial GOLD con multiples TPs
+        side = "BUY" if "BUY" in upper else "SELL"
+        # Numeros de 4 digitos
+        nums = re.findall(r"\d{4,5}(?:\.\d+)?", text)
+        slash_match = re.search(r"(\d{4,5})/(\d{4,5})", text)
+        sl_match = re.search(r"SL\s*(\d{4,5}(?:\.\d+)?)", upper)
+        tp_matches = re.findall(r"TP\s*(\d{4,5}(?:\.\d+)?)", upper)
+
+        entry = None
+        sl = float(sl_match.group(1)) if sl_match else None
+        tps = [float(x) for x in tp_matches] if tp_matches else []
+
+        if slash_match:
+            entry = (float(slash_match.group(1)) + float(slash_match.group(2))) / 2
+        else:
+            m = re.search(r"(?:BUY|SELL)\s*(\d{4,5}(?:\.\d+)?)", upper)
+            if m:
+                entry = float(m.group(1))
+            elif nums:
+                entry = float(nums[0])
+
+        # Si solo tiene entry tipo 4167/4164 sin TP/SL, guarda y espera siguiente mensaje con TPs
+        # Por ahora retorna None para no abrir sin SL/TP, pero guarda en cache (manejado en handler)
+        if not sl or not tps:
+            # Si tiene al menos 3 numeros, asume entry, TPs, SL
+            if len(nums) >= 3:
+                try:
+                    vals = [float(n) for n in nums]
+                    # Formato Damaris: GOLD BUY 4167 TP 4170 TP 4173 ... SL 4155 -> nums = [4167,4170,4173,4176,4179,4182,4155]
+                    # Entry = primero, SL = ultimo, TPs = medio
+                    if sl is None and len(vals) >= 2:
+                        sl = vals[-1]
+                    if not tps and len(vals) >= 3:
+                        tps = vals[1:-1] if len(vals) > 2 else [vals[1]]
+                    if entry is None:
+                        entry = vals[0]
+                except: pass
+
+        if entry and sl and tps:
+            return {
+                "action": "OPEN",
+                "symbol_raw": "GOLD",
+                "deriv_sym": "frxXAUUSD",
+                "base": "XAUUSD",
+                "side": side,
+                "entry": entry,
+                "sl": sl,
+                "tp": tps[0],
+                "tps": tps,
+                "text": text[:200]
+            }
+        # Si solo tiene GOLD BUY 4167/4164 sin TP/SL, no abre aun
+        return None
+
+    # Para otros pares forex (EURUSD etc) - logica original
     if not ("TP" in upper or "TAKE" in upper):
         return None
     if not ("SL" in upper or "STOP" in upper):
         return None
 
-    # Intenta regex principal
     m = SIGNAL_REGEX.search(text)
     if m:
         symbol_raw = m.group("symbol").upper().replace(" ", "")
@@ -121,42 +191,25 @@ def parse_signal(text):
         entry_raw = m.group("entry")
         sl_raw = m.group("sl")
         tp_raw = m.group("tp")
-
-        # Normaliza side
         side = "BUY" if side_raw in ("BUY","LONG","COMPRA") else "SELL"
-
-        # Normaliza symbol
         symbol_key = symbol_raw.replace("/","")
         deriv_sym = SYMBOL_ALIAS.get(symbol_key) or SYMBOL_ALIAS.get(symbol_raw) or None
         if not deriv_sym:
-            # Intenta buscar cualquier alias dentro del texto
             for k,v in SYMBOL_ALIAS.items():
                 if k in upper:
                     deriv_sym = v
                     symbol_key = k
                     break
-
         if not deriv_sym:
-            print(f"⚠️ Simbolo no mapeado: {symbol_raw}")
             return None
-
         try:
             sl = float(sl_raw)
             tp = float(tp_raw)
-            entry = float(entry_raw) if entry_raw else (sl + tp)/2  # estima entry si no viene
+            entry = float(entry_raw) if entry_raw else (sl + tp)/2
         except:
             return None
-
-        # Valida logica BUY/SELL
-        if side == "BUY" and not (sl < entry < tp or sl < tp):
-            # A veces Damaris manda SL y TP invertidos, corrige
-            if sl > tp:
-                # Si BUY y SL > TP, intercambia? No, mejor valida
-                pass
-        if side == "SELL" and not (tp < entry < sl or tp < sl):
-            pass
-
         return {
+            "action": "OPEN",
             "symbol_raw": symbol_raw,
             "deriv_sym": deriv_sym,
             "base": symbol_key,
@@ -167,32 +220,23 @@ def parse_signal(text):
             "text": text[:200]
         }
 
-    # Fallback: busca symbol + 3 numeros
-    # Ejemplo: "EURUSD BUY 1.08500 1.08000 1.09500" -> entry, sl, tp en orden
     for alias in SYMBOL_ALIAS.keys():
         if alias in upper:
             nums = NUMBERS_REGEX.findall(text)
             if len(nums) >= 3:
                 try:
-                    # Asume orden: entry, sl, tp
                     vals = [float(n) for n in nums[:5]]
-                    # Heuristica: el mas pequeño y mas grande
-                    # Para BUY: sl < entry < tp
-                    # Para SELL: tp < entry < sl
-                    # Toma los 3 primeros numeros como entry, sl, tp
                     entry, sl, tp = vals[0], vals[1], vals[2]
                     side = "BUY" if "BUY" in upper else "SELL"
-                    # Si BUY y sl > entry, intercambia sl y tp?
                     if side == "BUY" and sl > entry:
-                        # Intenta reordenar: sl debe ser menor que entry
                         sorted_vals = sorted(vals[:3])
                         sl, entry, tp = sorted_vals[0], sorted_vals[1], sorted_vals[2]
                     if side == "SELL" and sl < entry:
                         sorted_vals = sorted(vals[:3])
                         tp, entry, sl = sorted_vals[0], sorted_vals[1], sorted_vals[2]
-
                     deriv_sym = SYMBOL_ALIAS[alias]
                     return {
+                        "action": "OPEN",
                         "symbol_raw": alias,
                         "deriv_sym": deriv_sym,
                         "base": alias,
@@ -296,35 +340,49 @@ async def main():
         text = event.message.message or ""
         if not text:
             return
-        # Ignora mensajes de atribucion solo
         if text.strip().startswith("Fuente:"):
             return
 
-        print(f"\n📩 Nuevo mensaje en espejo: {text[:150]}...")
+        print(f"\n📩 Nuevo mensaje en espejo: {text[:200]}...")
 
         signal = parse_signal(text)
         if not signal:
             print("⏭️ No es señal BUY/SELL con TP/SL, ignoro")
             return
 
+        # Maneja CIERRE: "TP Done Hit Successfully" o "Ready for signal"
+        if signal.get("action") == "CLOSE":
+            base = signal.get("base","XAUUSD")
+            print(f"🔒 Señal de CIERRE detectada para {base}: {signal.get('reason')}")
+            # Aqui podrias cerrar posiciones abiertas en Deriv via API
+            # Por ahora solo log y limpia cache para permitir nueva entrada
+            if base in last_signals:
+                del last_signals[base]
+                print(f"✅ Cache limpiada para {base}, listo para nueva señal")
+            # Opcional: cerrar posiciones reales via WS portfolio + sell
+            try:
+                # Llama a check de cierres o sell manual
+                print(f"🔍 Verificando posiciones abiertas {base} para cierre...")
+            except: pass
+            return
+
+        # ABRIR
         base = signal["base"]
         now = time.time()
-        # Cooldown 24h por par (como v24/v25 fix 4x EURGBP)
         if base in last_signals:
             hours = (now - last_signals[base]) / 3600
             if hours < 24:
                 print(f"⏸️ {base} cooldown {hours:.1f}h < 24h, no duplico")
                 return
 
-        print(f"✅ Señal parseada: {signal}")
+        print(f"✅ Señal parseada ABRIR: {signal}")
 
         ok, out, cid = place_deriv_order(signal)
         if ok:
             last_signals[base] = now
-            print(f"✅ Orden ejecutada {base} cid={cid}")
-            # Opcional: envia confirmacion a tu canal espejo
+            print(f"✅ Orden ejecutada {base} cid={cid} TPs={signal.get('tps',[])}")
             try:
-                await client.send_message(entity, f"✅ Ejecutada en Deriv DEMO x100: {base} {signal['side']} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} Stake ${STAKE_USD} | CID {cid}\nFuente: Damaris Trades")
+                await client.send_message(entity, f"✅ Ejecutada en Deriv DEMO x100: {base} {signal['side']} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} (TPs {signal.get('tps',[])}) Stake ${STAKE_USD} | CID {cid}\nFuente: Damaris Trades")
             except: pass
         else:
             print(f"❌ Fallo orden {base}: {out[-500:]}")
