@@ -323,7 +323,7 @@ async def main():
     await client.start()
     print("✅ Telethon conectado")
 
-    # Resuelve entidad
+    # Resuelve entidad origen (Damaris)
     try:
         entity = await client.get_entity(listen_id)
         print(f"✅ Escuchando: {entity.title if hasattr(entity,'title') else entity}")
@@ -331,6 +331,26 @@ async def main():
         print(f"❌ No pude resolver LISTEN_CHAT {listen_id}: {ex}")
         print("   Prueba con ID numerico: -1003764305303 o -1001093875226")
         return
+
+    # Resuelve entidad destino espejo para copia (si es diferente)
+    dest_entity = None
+    dest_id_raw = DEST_CHAT
+    try:
+        # Si DEST_CHAT es link, intenta resolver, si falla usa ID numerico conocido
+        if dest_id_raw and str(dest_id_raw) != str(listen_id):
+            try:
+                dest_entity = await client.get_entity(dest_id_raw)
+            except:
+                # fallback ID numerico de tu espejo
+                try:
+                    dest_entity = await client.get_entity(-1003764305303)
+                    print(f"✅ Destino espejo fallback: {dest_entity.title if hasattr(dest_entity,'title') else dest_entity}")
+                except Exception as ex2:
+                    print(f"⚠️ No pude resolver DEST_CHAT {dest_id_raw}: {ex2} - solo hare Deriv")
+        if dest_entity:
+            print(f"✅ Copiando tambien a: {dest_entity.title if hasattr(dest_entity,'title') else dest_entity} ({dest_entity.id})")
+    except Exception as ex:
+        print(f"⚠️ Destino espejo no resuelto: {ex}")
 
     # Cache para no repetir misma señal en 24h (fix duplicados como v24/v25)
     last_signals = {}
@@ -343,7 +363,19 @@ async def main():
         if text.strip().startswith("Fuente:"):
             return
 
-        print(f"\n📩 Nuevo mensaje en espejo: {text[:200]}...")
+        print(f"\n📩 Nuevo mensaje en Damaris: {text[:200]}...")
+
+        # 1) ESPEJO: copia a tu canal Espejo damaris señales forex (TEXT_ONLY=1 con atribucion)
+        if dest_entity:
+            try:
+                # Respeta noforwards: solo texto + atribucion, no media
+                copy_text = text + "\n\nFuente: Damaris Trades"
+                # Evita loop si el mensaje ya es del bot
+                if "Ejecutada en Deriv" not in text:
+                    await client.send_message(dest_entity, copy_text)
+                    print(f"📤 Copiado a espejo {dest_entity.id}")
+            except Exception as ce:
+                print(f"⚠️ Fallo copia espejo: {ce}")
 
         signal = parse_signal(text)
         if not signal:
