@@ -163,6 +163,17 @@ def parse_signal(text):
                 except: pass
 
         if entry and sl and tps:
+            # FIX: Damaris manda TPs muy pegados (4123,4126...). Deriv rechaza TP 3$ con payout=0
+            # Usamos el TP más lejano para que Deriv acepte (4135 en vez de 4123)
+            # Para BUY, TP lejano = max(tps), para SELL = min(tps)
+            if side == "BUY":
+                tp_far = max(tps)
+            else:
+                tp_far = min(tps)
+            # Asegura distancia mínima 10$ para GOLD para que payout no sea 0
+            if abs(tp_far - entry) < 8:
+                # Si aun así es muy chico, usa 15$ de distancia
+                tp_far = entry + 15 if side == "BUY" else entry - 15
             return {
                 "action": "OPEN",
                 "symbol_raw": "GOLD",
@@ -171,8 +182,9 @@ def parse_signal(text):
                 "side": side,
                 "entry": entry,
                 "sl": sl,
-                "tp": tps[0],
+                "tp": tp_far,
                 "tps": tps,
+                "tp_first": tps[0],
                 "text": text[:200]
             }
         # Si solo tiene GOLD BUY 4167/4164 sin TP/SL, no abre aun
