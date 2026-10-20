@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
   Ejecuta la orden en DERIV (API NUEVA 2026: PAT + OTP → WebSocket DEMO)
-  FIX 2026-09-24: symbol -> underlying_symbol (breaking change de Deriv)
+  FIX 2026-09-24: symbol -> underlying_symbol
+  FIX 2026-10-20: Damaris GOLD TP muy pegado (3$) -> payout=0, ajusta a min 0.3%
 """
 import asyncio
 import json
@@ -17,14 +18,12 @@ except ImportError:
     print("❌ Falta la librería 'websockets'. Instala: pip install websockets")
     raise SystemExit(2)
 
-
 def e(key, default=None):
     return os.environ.get(key, default)
 
-
 API_TOKEN = (e("DERIV_API_TOKEN", "") or "").strip()
 APP_ID    = (e("DERIV_APP_ID", "") or "").strip()
-DRY_RUN   = (e("DERIV_DRY_RUN", "") or "").lower() in ("1", "true", "yes")
+DRY_RUN   = (e("DERIV_DRY_RUN", "") or "").lower() in ("1","true","yes")
 
 SIDE   = (e("DERIV_SIDE", "BUY") or "BUY").upper()
 SYMBOL = (e("DERIV_SYMBOL", "AUDNZD") or "AUDNZD").upper()
@@ -48,13 +47,12 @@ CONTRACT = {"BUY": "MULTUP", "SELL": "MULTDOWN"}
 REST = "https://api.derivws.com"
 MIN_USD = 0.35
 
-
 def fail(msg):
     print(f"❌ {msg}")
     raise SystemExit(1)
 
-
 def calc_usd():
+    global TP
     if SIDE not in CONTRACT:
         fail(f"side inválido: {SIDE} (usa BUY o SELL)")
     if ENTRY <= 0 or SL <= 0 or TP <= 0:
@@ -70,25 +68,25 @@ def calc_usd():
     risk_pct = abs(ENTRY - SL) / ENTRY
     rew_pct  = abs(TP - ENTRY) / ENTRY
 
-    # FIX 2026-09-24: Deriv solo acepta multipliers 100,200,300,500,800 para forex/crypto
-    # Antes bajabamos a 20 para respetar stop-out, pero Deriv rechaza 20 con MultiplierOutOfRange
-    # Ahora usamos siempre 100 (minimo permitido) y capeamos SL a 90% del stake si es necesario
+    # FIX 2026-10-20: Damaris TP muy pegado -> payout=0
+    min_rew_pct = 0.003
+    if rew_pct < min_rew_pct:
+        print(f"   ⚠️ TP muy cercano {rew_pct*100:.3f}% < {min_rew_pct*100}% -> ajusto TP a {min_rew_pct*100}% para evitar payout=0")
+        if SIDE == "BUY":
+            TP = ENTRY * (1 + min_rew_pct)
+        else:
+            TP = ENTRY * (1 - min_rew_pct)
+        rew_pct = abs(TP - ENTRY) / ENTRY
+
     ALLOWED_MULTS = [100, 200, 300, 500, 800, 1000]
-    # Elige el mult configurado si esta permitido, si no 100
-    if MULTIPLIER in ALLOWED_MULTS:
-        mult = MULTIPLIER
-    else:
-        # Si pide 20, 50, etc, usa 100 que es el minimo aceptado por Deriv para frx/cry
-        mult = 100
+    mult = MULTIPLIER if MULTIPLIER in ALLOWED_MULTS else 100
 
     adj = False
-    # Si el riesgo tecnico es muy amplio para mult 100, capeamos el SL a 90% del stake
-    # Efectivo: SL real sera mas ajustado que el tecnico, pero Deriv lo acepta
     if risk_pct > 0 and mult * risk_pct > 0.9:
-        sl_usd = STAKE * 0.9  # cap 90% del stake (max permitido sin stop-out inmediato)
+        sl_usd = STAKE * 0.9
         tp_usd = sl_usd * 3.0
         adj = True
-        print(f"   ⚠️ Riesgo tecnico {risk_pct*100:.2f}% muy amplio para mult {mult} -> SL capeado a 90% stake ({sl_usd} USD) para respetar limites Deriv (100,200,300...)")
+        print(f"   ⚠️ Riesgo tecnico {risk_pct*100:.2f}% muy amplio para mult {mult} -> SL capeado a 90% stake ({sl_usd} USD)")
     else:
         sl_usd = STAKE * mult * risk_pct
         tp_usd = STAKE * mult * rew_pct
@@ -97,13 +95,11 @@ def calc_usd():
     if sl_usd < MIN_USD:
         sl_usd = MIN_USD; adj = True
     if tp_usd < MIN_USD:
-        tp_usd = MIN_USD; adj = True
-    if adj and mult * risk_pct <= 0.9:
-        # Solo recalcula TP si no fue ya capeado arriba
-        tp_usd = round(max(tp_usd, sl_usd * 3.0), 2)
+        tp_usd = max(MIN_USD, round(sl_usd * 1.5, 2))
+        print(f"   ⚠️ TP USD muy chico, ajustado a {tp_usd} USD (1.5x SL) para evitar payout=0")
+        adj = True
 
     return sl_usd, tp_usd, adj, mult
-
 
 def rest(method, path, body=None, timeout=20):
     url = REST + path
@@ -129,7 +125,6 @@ def rest(method, path, body=None, timeout=20):
     except Exception as ex:
         return 0, {"error": str(ex)}
 
-
 async def rpc(ws, payload, req_id, timeout=30):
     payload = dict(payload)
     payload["req_id"] = req_id
@@ -141,7 +136,6 @@ async def rpc(ws, payload, req_id, timeout=30):
         if data.get("req_id") == req_id:
             return data
     fail(f"Timeout esperando respuesta (req_id={req_id})")
-
 
 def get_demo_otp_ws():
     print(f"🔐 [DEMO-ONLY] REST con PAT | Deriv-App-ID={APP_ID[:6]}...")
@@ -177,7 +171,6 @@ def get_demo_otp_ws():
     print(f"✅ OTP listo -> {ws_url.split('?')[0]}?otp=***")
     return ws_url
 
-
 async def place_order():
     sl_usd, tp_usd, adj, mult = calc_usd()
     contract = CONTRACT[SIDE]
@@ -188,21 +181,18 @@ async def place_order():
     print(f"   entrada     : {ENTRY}")
     print(f"   SL precio   : {SL}  ->  stop_loss  = {sl_usd} USD")
     print(f"   TP precio   : {TP}  ->  take_profit = {tp_usd} USD  (R:R 1:{tp_usd / sl_usd:.2f})")
-    print(f"   stake       : {STAKE} USD × multiplicador {mult:g}" + (f" (bajado de {MULTIPLIER:g} para respetar el stop-out)" if mult != MULTIPLIER else ""))
-    if adj and mult == MULTIPLIER:
-        print("   ⚠️ SL/TP ajustados al mínimo de Deriv (0.35 USD).")
+    print(f"   stake       : {STAKE} USD × multiplicador {mult:g}")
 
     if DRY_RUN:
         print("✅ DRY_RUN=1: orden NO enviada (solo simulación).")
         return
     if not API_TOKEN:
-        fail("Falta DERIV_API_TOKEN (PAT de developers.deriv.com).")
+        fail("Falta DERIV_API_TOKEN")
     if not APP_ID:
-        fail("Falta DERIV_APP_ID (sin App ID el PAT no sirve).")
+        fail("Falta DERIV_APP_ID")
 
     ws_url = get_demo_otp_ws()
 
-    # FIX 2026: Deriv New API renombró symbol -> underlying_symbol
     proposal = {
         "proposal": 1,
         "amount": STAKE,
@@ -225,7 +215,6 @@ async def place_order():
         payout = prop.get("payout", "?")
         spot = prop.get("spot", "?")
         print(f"✅ Cotización: id={pid} | payout={payout} | spot={spot}")
-        # v12 FIX: si payout=0 o pid vacio, la propuesta es invalida (precio movido / SL no valido)
         if not pid or payout==0 or payout=="0":
             fail(f"buy: InvalidContractProposal - Unknown contract proposal (payout=0 id={pid} spot={spot}) - propuesta expirada o SL/TP no valido")
 
@@ -237,7 +226,6 @@ async def place_order():
         paid = b.get("buy_price", STAKE)
         print(f"🚀 ORDEN EJECUTADA (DEMO): {DERIV_SYMBOL} {contract} | stake={paid} USD | mult={mult:g} | SL={sl_usd} TP={tp_usd} USD | contract_id={cid}")
 
-
 def main():
     try:
         asyncio.run(place_order())
@@ -245,7 +233,6 @@ def main():
         raise
     except Exception as ex:
         fail(f"{type(ex).__name__}: {ex}")
-
 
 if __name__ == "__main__":
     main()
