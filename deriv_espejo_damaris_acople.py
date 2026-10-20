@@ -398,14 +398,18 @@ async def main():
             except: pass
             return
 
-        # ABRIR
+        # ABRIR - FIX: Damaris GOLD es scalping, no 24h cooldown
         base = signal["base"]
         now = time.time()
+        # Para GOLD/XAUUSD de Damaris, cooldown 5 min, no 24h
+        cooldown_h = 0.083 if base in ("XAUUSD", "GOLD", "frxXAUUSD") else 24
         if base in last_signals:
             hours = (now - last_signals[base]) / 3600
-            if hours < 24:
-                print(f"⏸️ {base} cooldown {hours:.1f}h < 24h, no duplico")
+            if hours < cooldown_h:
+                print(f"⏸️ {base} cooldown {hours*60:.1f}min < {cooldown_h*60:.0f}min, no duplico")
                 return
+            else:
+                print(f"✅ {base} cooldown pasado {hours:.1f}h >= {cooldown_h}h, permito")
 
         print(f"✅ Señal parseada ABRIR: {signal}")
 
