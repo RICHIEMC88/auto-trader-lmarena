@@ -379,8 +379,25 @@ async def main():
 
         print(f"\n📩 Nuevo mensaje en Damaris: {text[:200]}...")
 
-        # 1) ESPEJO: copia a tu canal Espejo damaris señales forex (TEXT_ONLY=1 con atribucion)
-        if dest_entity:
+        # FILTRO ANUNCIOS: no copiar anuncios a espejo
+        upper = text.upper()
+        is_ad = False
+        ad_keywords = [
+            "PREMIUM GROUP", "JOIN HERE", "VIP GROUP OPEN", "LIMITED FOR FIRST",
+            "ACCOUNT MANAGEMENT SERVICE", "YOU KEEP FULL CONTROL", "NO MINIMUM",
+            "MESSAGE ME @", "I WILL DELETE THE LINK", "600+ PIPS TARGET",
+            "200+ PIPS TARGET", "FREE !!", "T.ME/+", "HTTPS://T.ME/+"
+        ]
+        for kw in ad_keywords:
+            if kw in upper:
+                is_ad = True
+                break
+        # Si tiene link de telegram y no tiene BUY/SELL, es anuncio
+        if ("HTTPS://T.ME/" in upper or "T.ME/+" in upper) and not ("BUY" in upper or "SELL" in upper):
+            is_ad = True
+
+        # 1) ESPEJO: copia SOLO si no es anuncio
+        if dest_entity and not is_ad:
             try:
                 copy_text = text + "\n\nFuente: Damaris Trades"
                 if "Ejecutada en Deriv" not in text:
@@ -388,6 +405,8 @@ async def main():
                     print(f"📤 Copiado a espejo {dest_entity.id}")
             except Exception as ce:
                 print(f"⚠️ Fallo copia espejo: {ce}")
+        elif is_ad:
+            print(f"🚫 Anuncio detectado, no copio a espejo: {text[:100]}...")
 
         # 2) INTENTO PARSE DIRECTO (todo en 1 mensaje)
         signal = parse_signal(text)
