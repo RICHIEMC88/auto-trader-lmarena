@@ -366,6 +366,8 @@ async def main():
 
     # Cache para no repetir misma señal en 24h (fix duplicados como v24/v25)
     last_signals = {}
+    # Cache para señales partidas en varios mensajes (GOLD SELL 4122 / TPs / SL 4134)
+    pending_gold = {"side": None, "entry": None, "tps": [], "sl": None, "ts": 0, "raw": ""}
 
     @client.on(events.NewMessage(chats=entity))
     async def handler(event):
@@ -380,16 +382,80 @@ async def main():
         # 1) ESPEJO: copia a tu canal Espejo damaris señales forex (TEXT_ONLY=1 con atribucion)
         if dest_entity:
             try:
-                # Respeta noforwards: solo texto + atribucion, no media
                 copy_text = text + "\n\nFuente: Damaris Trades"
-                # Evita loop si el mensaje ya es del bot
                 if "Ejecutada en Deriv" not in text:
                     await client.send_message(dest_entity, copy_text)
                     print(f"📤 Copiado a espejo {dest_entity.id}")
             except Exception as ce:
                 print(f"⚠️ Fallo copia espejo: {ce}")
 
+        # 2) INTENTO PARSE DIRECTO (todo en 1 mensaje)
         signal = parse_signal(text)
+
+        # 3) SI NO ES SEÑAL COMPLETA, INTENTA JUNTAR MENSAJES PARTIDOS (Damaris manda 3 msgs)
+        if not signal:
+            upper = text.upper()
+            now = time.time()
+            # Limpia pending si pasaron 3 min sin completar
+            if now - pending_gold["ts"] > 180 and pending_gold["entry"]:
+                print(f"🧹 Pending GOLD expirado, limpio")
+                pending_gold.update({"side": None, "entry": None, "tps": [], "sl": None, "ts": 0, "raw": ""})
+
+            # Detecta BUY/SELL
+            if "BUY" in upper:
+                pending_gold["side"] = "BUY"
+                pending_gold["ts"] = now
+            elif "SELL" in upper:
+                pending_gold["side"] = "SELL"
+                pending_gold["ts"] = now
+
+            # Detecta entry tipo 4122/4125 o 4122
+            m_entry = re.search(r"(?:GOLD|SELL|BUY)\s*(\d{4,5})(?:/(\d{4,5}))?", upper)
+            if m_entry:
+                e1 = float(m_entry.group(1))
+                e2 = float(m_entry.group(2)) if m_entry.group(2) else e1
+                pending_gold["entry"] = (e1 + e2) / 2
+                pending_gold["ts"] = now
+                print(f"📌 Pending entry: {pending_gold['entry']}")
+
+            # Detecta TPs
+            tps = re.findall(r"TP\s*(\d{4,5}(?:\.\d+)?)", upper)
+            if tps:
+                pending_gold["tps"] = [float(x) for x in tps]
+                pending_gold["ts"] = now
+                print(f"📌 Pending TPs: {pending_gold['tps']}")
+
+            # Detecta SL solo (ej: \"SL 4134\")
+            m_sl = re.search(r"SL\s*(\d{4,5}(?:\.\d+)?)", upper)
+            if m_sl:
+                pending_gold["sl"] = float(m_sl.group(1))
+                pending_gold["ts"] = now
+                print(f"📌 Pending SL: {pending_gold['sl']}")
+
+            # Si ya tenemos entry + SL + TPs, armamos señal completa
+            if pending_gold["entry"] and pending_gold["sl"] and pending_gold["tps"] and pending_gold["side"]:
+                side = pending_gold["side"]
+                entry = pending_gold["entry"]
+                sl = pending_gold["sl"]
+                tps = pending_gold["tps"]
+                tp_far = max(tps) if side == "BUY" else min(tps)
+                if abs(tp_far - entry) < 8:
+                    tp_far = entry + 15 if side == "BUY" else entry - 15
+                signal = {
+                    "action": "OPEN",
+                    "symbol_raw": "GOLD",
+                    "deriv_sym": "frxXAUUSD",
+                    "base": "XAUUSD",
+                    "side": side,
+                    "entry": entry,
+                    "sl": sl,
+                    "tp": tp_far,
+                    "tps": tps,
+                    "text": f"GOLD {side} {entry} SL {sl} TP {tp_far} (juntado de varios msgs)"
+                }
+                print(f"✅ Señal COMPLETADA de mensajes partidos: {signal}")
+                # Limpia pending para próxima señal
+                pending_gold.update({"side": None, "entry": None, "tps": [], "sl": None, "ts": 0, "raw": ""})
         if not signal:
             print("⏭️ No es señal BUY/SELL con TP/SL, ignoro")
             return
