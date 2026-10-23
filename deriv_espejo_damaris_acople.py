@@ -445,27 +445,40 @@ async def main():
 
         print(f"\n📩 Nuevo mensaje en [{src_label}] {chat_id}: {text[:200]}... | stake ${stake_use}")
 
-        # FILTRO ANUNCIOS: deja pasar solo los que llevan @Damaris_Trader
+        # FILTRO ANUNCIOS: solo deja pasar @Damaris_Trader y señales con numeros
         upper = text.upper()
         is_ad = False
+        has_at_damaris = "@DAMARIS_TRADER" in upper or "@DAMARIS_TRADER" in text
         # Si lleva @Damaris_Trader, NO es anuncio malo, dejalo pasar
-        if "@DAMARIS_TRADER" in upper or "@DAMARIS_TRADER" in text:
+        if has_at_damaris:
             is_ad = False
         else:
             ad_keywords = [
                 "PREMIUM GROUP", "JOIN HERE", "VIP GROUP OPEN", "LIMITED FOR FIRST",
-                "YOU KEEP FULL CONTROL", "NO MINIMUM",
-                "I WILL DELETE THE LINK", "600+ PIPS TARGET",
-                "200+ PIPS TARGET", "FREE !!", "LIFETIME SUBSCRIPTION",
-                "OFFER VALID FOR", "CHOSE SIGNALS", "READY FOR VIP SIGNALS"
+                "YOU KEEP FULL CONTROL", "NO MINIMUM", "ACCOUNT MANAGEMENT",
+                "CLIFFORD TRADING", "PROFIT SHARE", "MINIMUM EQUITY", "CONTACT ADMIN",
+                "I WILL DELETE THE LINK", "600+ PIPS TARGET", "200+ PIPS TARGET",
+                "FREE !!", "LIFETIME SUBSCRIPTION", "SUBSCRIPTION", "FREE JOIN",
+                "1 YEARS FREE", "YEARS FREE JOIN", "REQUEST TO JOIN",
+                "OFFER VALID FOR", "CHOSE SIGNALS", "READY FOR VIP SIGNALS",
+                "VIP TODAY FREE", "MONTH SUBSCRIPTION", "CHOOSE SIGNALS",
+                "USE BIG LOT", "SL & TP", "300+PIPS TARGET", "300+ PIPS"
             ]
             for kw in ad_keywords:
                 if kw in upper:
                     is_ad = True
                     break
-            # Si tiene link de telegram y no tiene BUY/SELL y no tiene @Damaris_Trader, es anuncio
-            if ("HTTPS://T.ME/" in upper or "T.ME/+" in upper) and not ("BUY" in upper or "SELL" in upper):
-                is_ad = True
+            # Si tiene link de telegram y no tiene @Damaris_Trader, es anuncio (aunque tenga BUY/SELL)
+            if ("HTTPS://T.ME/" in upper or "T.ME/+" in upper or "HTTPS://T.ME/+RB" in upper) and not has_at_damaris:
+                # Si ademas no tiene SL numerico o TP numerico, es 100% anuncio
+                if not re.search(r"SL\s*\d{3,5}", upper) or not re.search(r"TP\s*\d{3,5}", upper):
+                    is_ad = True
+            # Si dice USE BIG LOT pero sin numeros de entrada/SL/TP reales, es anuncio
+            if "USE BIG LOT" in upper:
+                # busca si tiene al menos 2 numeros de 4 digitos (entry/sl/tp)
+                nums_4d = re.findall(r"\b\d{4,5}(?:\.\d+)?\b", text)
+                if len(nums_4d) < 2:
+                    is_ad = True
 
         # 1) ESPEJO: copia SOLO si no es anuncio
         if dest_entity and not is_ad:
