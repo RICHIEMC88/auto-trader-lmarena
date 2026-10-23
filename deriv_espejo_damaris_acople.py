@@ -448,23 +448,29 @@ async def main():
         # FILTRO ANUNCIOS: solo deja pasar @Damaris_Trader y señales con numeros reales
         upper = text.upper()
         is_ad = False
-        has_at_damaris = "@DAMARIS_TRADER" in upper or "@DAMARIS_TRADER" in text
+        has_at_damaris = "@DAMARIS_TRADER" in upper or "@DAMARIS_TRADER" in text or "@DAMARIS_TRADER" in upper.replace(" ", "")
 
         # Primero intenta parsear: si es señal valida con SL y TP numericos, NUNCA es anuncio
+        # Tambien si es CIERRE (TP Done), NUNCA es anuncio - es importante
         temp_signal = parse_signal(text)
         is_valid_signal = temp_signal and temp_signal.get("action") == "OPEN"
+        is_close_signal = temp_signal and temp_signal.get("action") == "CLOSE"
 
-        if has_at_damaris:
+        if is_close_signal:
+            is_ad = False  # TP Done Hit Successfully SIEMPRE se copia
+            print(f"✅ Señal CIERRE detectada, no es anuncio: {text[:80]}...")
+        elif has_at_damaris:
             is_ad = False
+            print(f"✅ Contiene @Damaris_Trader, no es anuncio: {text[:80]}...")
         elif is_valid_signal:
             is_ad = False  # señal real, no filtrar aunque contenga "300 PIPS"
         else:
             ad_keywords = [
                 "PREMIUM GROUP", "JOIN HERE", "VIP GROUP OPEN", "LIMITED FOR FIRST",
-                "YOU KEEP FULL CONTROL", "NO MINIMUM", "ACCOUNT MANAGEMENT",
+                "YOU KEEP FULL CONTROL", "NO MINIMUM",
                 "CLIFFORD TRADING", "PROFIT SHARE", "MINIMUM EQUITY", "CONTACT ADMIN",
                 "I WILL DELETE THE LINK", "600+ PIPS TARGET", "200+ PIPS TARGET",
-                "FREE !!", "LIFETIME SUBSCRIPTION", "SUBSCRIPTION", "FREE JOIN",
+                "FREE !!", "LIFETIME SUBSCRIPTION", "FREE JOIN",
                 "1 YEARS FREE", "YEARS FREE JOIN", "REQUEST TO JOIN",
                 "OFFER VALID FOR", "CHOSE SIGNALS", "READY FOR VIP SIGNALS",
                 "VIP TODAY FREE", "MONTH SUBSCRIPTION", "CHOOSE SIGNALS",
@@ -472,25 +478,31 @@ async def main():
             for kw in ad_keywords:
                 if kw in upper:
                     is_ad = True
+                    print(f"🚫 Ad keyword '{kw}' detectado")
                     break
             # Links de telegram sin @Damaris_Trader y sin SL/TP numerico = anuncio
-            if ("HTTPS://T.ME/" in upper or "T.ME/+" in upper) and not has_at_damaris:
+            if not is_ad and ("HTTPS://T.ME/" in upper or "T.ME/+" in upper) and not has_at_damaris:
                 if not re.search(r"SL\s*\d{3,5}", upper) or not re.search(r"TP\s*\d{3,5}", upper):
                     is_ad = True
+                    print(f"🚫 Link t.me sin SL/TP numerico = anuncio")
             # USE BIG LOT sin numeros = anuncio
-            if "USE BIG LOT" in upper:
+            if not is_ad and "USE BIG LOT" in upper:
                 nums_4d = re.findall(r"\b\d{4,5}(?:\.\d+)?\b", text)
                 if len(nums_4d) < 2:
                     is_ad = True
+                    print(f"🚫 USE BIG LOT sin numeros = anuncio")
             # Mensajes tipo "BUY okay" sin numeros = no copiar
-            if re.match(r"^\s*(BUY|SELL)\s+OKAY", upper):
+            if not is_ad and re.match(r"^\s*(BUY|SELL)\s+OKAY", upper):
                 is_ad = True
+                print(f"🚫 BUY/SELL okay sin numeros = ruido")
             # Mensajes muy cortos sin numeros de 4 digitos y sin SL/TP = anuncio/ruido
-            if not is_valid_signal and len(re.findall(r"\b\d{3,5}\b", text)) < 2:
-                if "BUY" in upper or "SELL" in upper:
-                    # Si dice BUY/SELL pero no tiene SL ni TP numerico, es ruido
-                    if not re.search(r"SL\s*\d", upper) and not re.search(r"TP\s*\d", upper):
-                        is_ad = True
+            if not is_ad and not is_valid_signal and not is_close_signal:
+                if len(re.findall(r"\b\d{3,5}\b", text)) < 2:
+                    if "BUY" in upper or "SELL" in upper:
+                        if not re.search(r"SL\s*\d", upper) and not re.search(r"TP\s*\d", upper):
+                            # Excepcion: si tiene @Damaris_Trader ya lo dejamos pasar arriba
+                            is_ad = True
+                            print(f"🚫 BUY/SELL sin SL/TP numerico = ruido")
 
         # 1) ESPEJO: copia SOLO si no es anuncio
         if dest_entity and not is_ad:
