@@ -54,11 +54,17 @@ SOURCE_CHAT = e("SOURCE_CHAT","-1001093875226").strip()  # Damaris origen o tu e
 DEST_CHAT = e("DEST_CHAT","https://t.me/+ctcdXJmNE7s0MDUz").strip()
 # Para acople Deriv, escuchamos DEST_CHAT (tu espejo) para no duplicar logica
 LISTEN_CHAT = e("LISTEN_CHAT", DEST_CHAT).strip()  # por defecto tu espejo
+# Multi-fuente: Damaris + UK (agrega IDs separados por coma en Railway)
+# Ej: LISTEN_CHATS=-1001093875226,-1001149970736
+LISTEN_CHATS_RAW = e("LISTEN_CHATS","").strip()
+UK_CHAT_ID = e("UK_CHAT_ID","").strip()  # pon ID de UK PROFESSIONAL TRADING SCHOOL
 
-# Config Deriv
+# Config Deriv con diferenciacion por origen
 DERIV_API_TOKEN = (e("DERIV_API_TOKEN","") or "").strip()
 DERIV_APP_ID = (e("DERIV_APP_ID","") or "").strip()
 STAKE_USD = float(e("STAKE_USD","20") or 20)
+STAKE_DAMARIS = float(e("STAKE_DAMARIS", str(STAKE_USD)) or STAKE_USD)  # $10 para Damaris
+STAKE_UK = float(e("STAKE_UK","12") or 12)  # $12 para UK - asi los diferencias en Deriv
 DRY_RUN = (e("DRY_RUN","0") or "0").lower() in ("1","true","yes")
 
 # Mapeo simbolos Damaris -> Deriv
@@ -262,20 +268,23 @@ def parse_signal(text):
                     continue
     return None
 
-def place_deriv_order(signal):
+def place_deriv_order(signal, stake_override=None, source_label="DAMARIS"):
     """
     Ejecuta orden en Deriv via deriv_place_signal_FIXED.py
+    stake_override y source_label para diferenciar DAMARIS vs UK en Deriv
     """
+    stake = stake_override if stake_override else STAKE_USD
     env = dict(os.environ)
     env.update({
         "DERIV_SIDE": signal["side"],
         "DERIV_SYMBOL": signal["deriv_sym"],
-        "STAKE_USD": str(STAKE_USD),
+        "STAKE_USD": str(stake),
         "SIGNAL_ENTRY": str(signal["entry"]),
         "SIGNAL_SL": str(signal["sl"]),
         "SIGNAL_TP": str(signal["tp"]),
         "DERIV_API_TOKEN": DERIV_API_TOKEN,
         "DERIV_APP_ID": DERIV_APP_ID,
+        "SIGNAL_SOURCE": source_label,
     })
     if DRY_RUN:
         env["DERIV_DRY_RUN"] = "1"
@@ -284,7 +293,7 @@ def place_deriv_order(signal):
     if not os.path.exists(script):
         script = "deriv_place_signal.py"
 
-    print(f"🚀 Ejecutando Deriv: {signal['base']} {signal['side']} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} Stake ${STAKE_USD} via {script}")
+    print(f"🚀 [{source_label}] Ejecutando Deriv: {signal['base']} {signal['side']} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} Stake ${stake} via {script}")
     try:
         p = subprocess.run([sys.executable, script], capture_output=True, text=True, env=env, timeout=120)
         out = (p.stdout or "") + (p.stderr or "")
@@ -313,10 +322,38 @@ async def main():
     except:
         listen_id = LISTEN_CHAT  # puede ser link https://t.me/+...
 
+    # Construye mapa de chats a escuchar (multi-fuente)
+    listen_map = {}
+    # 1) LISTEN_CHATS si existe (lista separada por comas)
+    if LISTEN_CHATS_RAW:
+        for raw in LISTEN_CHATS_RAW.split(","):
+            raw=raw.strip()
+            if not raw: continue
+            try:
+                cid = int(raw)
+                # detecta origen por ID conocido
+                if str(cid) == "-1001093875226":
+                    listen_map[cid] = "DAMARIS"
+                elif UK_CHAT_ID and str(cid) == UK_CHAT_ID:
+                    listen_map[cid] = "UK"
+                else:
+                    listen_map[cid] = "UNKNOWN"
+            except:
+                pass
+    # 2) UK_CHAT_ID individual
+    if UK_CHAT_ID:
+        try:
+            cid = int(UK_CHAT_ID)
+            listen_map[cid] = "UK"
+        except: pass
+    # 3) fallback LISTEN_CHAT original
+    if not listen_map:
+        listen_map[listen_id if isinstance(listen_id,int) else -1001093875226] = "DAMARIS"
+
     print(f"🔐 Conectando Telethon como espejo...")
     print(f"   API_ID: {TG_API_ID}")
-    print(f"   LISTEN_CHAT: {listen_id} (tu espejo {DEST_CHAT})")
-    print(f"   STAKE: ${STAKE_USD} DRY_RUN={DRY_RUN}")
+    print(f"   LISTEN_CHATS: {listen_map} (tu espejo {DEST_CHAT})")
+    print(f"   STAKE_DAMARIS=${STAKE_DAMARIS} STAKE_UK=${STAKE_UK} DRY_RUN={DRY_RUN}")
 
     # FIX: limpia saltos de linea y espacios que Railway mete al copiar
     clean_session = TG_SESSION.strip().replace("\n","").replace("\r","").replace(" ","")
@@ -335,25 +372,36 @@ async def main():
     await client.start()
     print("✅ Telethon conectado")
 
-    # Resuelve entidad origen (Damaris)
-    try:
-        entity = await client.get_entity(listen_id)
-        print(f"✅ Escuchando: {entity.title if hasattr(entity,'title') else entity}")
-    except Exception as ex:
-        print(f"❌ No pude resolver LISTEN_CHAT {listen_id}: {ex}")
-        print("   Prueba con ID numerico: -1003764305303 o -1001093875226")
-        return
+    # Resuelve todas las entidades a escuchar (Damaris + UK)
+    entities = []
+    entities_map = {}  # id -> source label
+    for cid, src in listen_map.items():
+        try:
+            ent = await client.get_entity(cid)
+            entities.append(ent)
+            entities_map[ent.id] = src
+            print(f"✅ Escuchando [{src}]: {ent.title if hasattr(ent,'title') else ent} ID {ent.id}")
+        except Exception as ex:
+            print(f"⚠️ No pude resolver {cid} [{src}]: {ex}")
+    if not entities:
+        # fallback intento con listen_id original
+        try:
+            ent = await client.get_entity(listen_id)
+            entities = [ent]
+            entities_map[ent.id] = "DAMARIS"
+            print(f"✅ Escuchando fallback: {ent.title if hasattr(ent,'title') else ent}")
+        except Exception as ex:
+            print(f"❌ No pude resolver LISTEN_CHAT {listen_id}: {ex}")
+            return
 
     # Resuelve entidad destino espejo para copia (si es diferente)
     dest_entity = None
     dest_id_raw = DEST_CHAT
     try:
-        # Si DEST_CHAT es link, intenta resolver, si falla usa ID numerico conocido
-        if dest_id_raw and str(dest_id_raw) != str(listen_id):
+        if dest_id_raw:
             try:
                 dest_entity = await client.get_entity(dest_id_raw)
             except:
-                # fallback ID numerico de tu espejo
                 try:
                     dest_entity = await client.get_entity(-1003764305303)
                     print(f"✅ Destino espejo fallback: {dest_entity.title if hasattr(dest_entity,'title') else dest_entity}")
@@ -364,12 +412,12 @@ async def main():
     except Exception as ex:
         print(f"⚠️ Destino espejo no resuelto: {ex}")
 
-    # Cache para no repetir misma señal en 24h (fix duplicados como v24/v25)
+    # Cache para no repetir misma señal en 24h
     last_signals = {}
-    # Cache para señales partidas en varios mensajes (GOLD SELL 4122 / TPs / SL 4134)
+    # Cache para señales partidas
     pending_gold = {"side": None, "entry": None, "tps": [], "sl": None, "ts": 0, "raw": ""}
 
-    @client.on(events.NewMessage(chats=entity))
+    @client.on(events.NewMessage(chats=entities))
     async def handler(event):
         text = event.message.message or ""
         if not text:
@@ -377,7 +425,25 @@ async def main():
         if text.strip().startswith("Fuente:"):
             return
 
-        print(f"\n📩 Nuevo mensaje en Damaris: {text[:200]}...")
+        # Detecta origen real (DAMARIS o UK)
+        chat_id = event.chat_id if hasattr(event, 'chat_id') else (event.chat.id if hasattr(event.chat,'id') else 0)
+        # Telethon NewMessage con chats multiples usa chat_id
+        try:
+            src_label = entities_map.get(chat_id, "DAMARIS")
+            # si chat_id no esta en map, intenta por peer
+            if src_label == "DAMARIS" and len(entities_map)>0:
+                # busca si el ID coincide con alguno conocido
+                for eid, lbl in entities_map.items():
+                    if str(chat_id).endswith(str(eid)[-6:]):
+                        src_label = lbl
+                        break
+        except:
+            src_label = "DAMARIS"
+
+        # Stake segun origen
+        stake_use = STAKE_DAMARIS if src_label == "DAMARIS" else STAKE_UK if src_label == "UK" else STAKE_USD
+
+        print(f"\n📩 Nuevo mensaje en [{src_label}] {chat_id}: {text[:200]}... | stake ${stake_use}")
 
         # FILTRO ANUNCIOS: deja pasar solo los que llevan @Damaris_Trader
         upper = text.upper()
@@ -404,10 +470,10 @@ async def main():
         # 1) ESPEJO: copia SOLO si no es anuncio
         if dest_entity and not is_ad:
             try:
-                copy_text = text + "\n\nFuente: Damaris Trades"
+                copy_text = text + f"\n\nFuente: {src_label} Trades"
                 if "Ejecutada en Deriv" not in text:
                     await client.send_message(dest_entity, copy_text)
-                    print(f"📤 Copiado a espejo {dest_entity.id}")
+                    print(f"📤 Copiado a espejo {dest_entity.id} [{src_label}]")
             except Exception as ce:
                 print(f"⚠️ Fallo copia espejo: {ce}")
         elif is_ad:
@@ -513,17 +579,29 @@ async def main():
             else:
                 print(f"✅ {base} cooldown pasado {hours:.1f}h >= {cooldown_h}h, permito")
 
-        print(f"✅ Señal parseada ABRIR: {signal}")
+        print(f"✅ Señal parseada ABRIR [{src_label}]: {signal}")
 
-        ok, out, cid = place_deriv_order(signal)
+        ok, out, cid = place_deriv_order(signal, stake_override=stake_use, source_label=src_label)
         if ok:
             last_signals[base] = now
-            print(f"✅ Orden ejecutada {base} cid={cid} TPs={signal.get('tps',[])}")
+            print(f"✅ Orden ejecutada [{src_label}] {base} cid={cid} TPs={signal.get('tps',[])} stake=${stake_use}")
+            # Guarda mapping para diferenciar en Deriv
             try:
-                await client.send_message(entity, f"✅ Ejecutada en Deriv DEMO x100: {base} {signal['side']} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} (TPs {signal.get('tps',[])}) Stake ${STAKE_USD} | CID {cid}\nFuente: Damaris Trades")
+                mapping_file = "open_trades.json"
+                data = {}
+                if os.path.exists(mapping_file):
+                    data = json.loads(open(mapping_file).read() or "{}")
+                data[str(cid or f'{base}_{int(now)}')] = {"source": src_label, "base": base, "side": signal['side'], "entry": signal['entry'], "sl": signal['sl'], "tp": signal['tp'], "stake": stake_use, "time": datetime.now().isoformat()}
+                open(mapping_file, 'w').write(json.dumps(data, indent=2))
+            except: pass
+            try:
+                # Envia confirmacion al chat origen
+                first_ent = entities[0] if entities else None
+                if first_ent:
+                    await client.send_message(first_ent, f"✅ [{src_label}] Ejecutada en Deriv DEMO x100: {base} {signal['side']} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} (TPs {signal.get('tps',[])}) Stake ${stake_use} | CID {cid}\nFuente: {src_label} Trades")
             except: pass
         else:
-            print(f"❌ Fallo orden {base}: {out[-500:]}")
+            print(f"❌ Fallo orden [{src_label}] {base}: {out[-500:]}")
 
     print("👂 Escuchando mensajes 24/7... (Ctrl+C para salir)")
     await client.run_until_disconnected()
