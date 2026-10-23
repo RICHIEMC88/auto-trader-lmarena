@@ -445,13 +445,19 @@ async def main():
 
         print(f"\n📩 Nuevo mensaje en [{src_label}] {chat_id}: {text[:200]}... | stake ${stake_use}")
 
-        # FILTRO ANUNCIOS: solo deja pasar @Damaris_Trader y señales con numeros
+        # FILTRO ANUNCIOS: solo deja pasar @Damaris_Trader y señales con numeros reales
         upper = text.upper()
         is_ad = False
         has_at_damaris = "@DAMARIS_TRADER" in upper or "@DAMARIS_TRADER" in text
-        # Si lleva @Damaris_Trader, NO es anuncio malo, dejalo pasar
+
+        # Primero intenta parsear: si es señal valida con SL y TP numericos, NUNCA es anuncio
+        temp_signal = parse_signal(text)
+        is_valid_signal = temp_signal and temp_signal.get("action") == "OPEN"
+
         if has_at_damaris:
             is_ad = False
+        elif is_valid_signal:
+            is_ad = False  # señal real, no filtrar aunque contenga "300 PIPS"
         else:
             ad_keywords = [
                 "PREMIUM GROUP", "JOIN HERE", "VIP GROUP OPEN", "LIMITED FOR FIRST",
@@ -462,23 +468,29 @@ async def main():
                 "1 YEARS FREE", "YEARS FREE JOIN", "REQUEST TO JOIN",
                 "OFFER VALID FOR", "CHOSE SIGNALS", "READY FOR VIP SIGNALS",
                 "VIP TODAY FREE", "MONTH SUBSCRIPTION", "CHOOSE SIGNALS",
-                "USE BIG LOT", "SL & TP", "300+PIPS TARGET", "300+ PIPS"
             ]
             for kw in ad_keywords:
                 if kw in upper:
                     is_ad = True
                     break
-            # Si tiene link de telegram y no tiene @Damaris_Trader, es anuncio (aunque tenga BUY/SELL)
-            if ("HTTPS://T.ME/" in upper or "T.ME/+" in upper or "HTTPS://T.ME/+RB" in upper) and not has_at_damaris:
-                # Si ademas no tiene SL numerico o TP numerico, es 100% anuncio
+            # Links de telegram sin @Damaris_Trader y sin SL/TP numerico = anuncio
+            if ("HTTPS://T.ME/" in upper or "T.ME/+" in upper) and not has_at_damaris:
                 if not re.search(r"SL\s*\d{3,5}", upper) or not re.search(r"TP\s*\d{3,5}", upper):
                     is_ad = True
-            # Si dice USE BIG LOT pero sin numeros de entrada/SL/TP reales, es anuncio
+            # USE BIG LOT sin numeros = anuncio
             if "USE BIG LOT" in upper:
-                # busca si tiene al menos 2 numeros de 4 digitos (entry/sl/tp)
                 nums_4d = re.findall(r"\b\d{4,5}(?:\.\d+)?\b", text)
                 if len(nums_4d) < 2:
                     is_ad = True
+            # Mensajes tipo "BUY okay" sin numeros = no copiar
+            if re.match(r"^\s*(BUY|SELL)\s+OKAY", upper):
+                is_ad = True
+            # Mensajes muy cortos sin numeros de 4 digitos y sin SL/TP = anuncio/ruido
+            if not is_valid_signal and len(re.findall(r"\b\d{3,5}\b", text)) < 2:
+                if "BUY" in upper or "SELL" in upper:
+                    # Si dice BUY/SELL pero no tiene SL ni TP numerico, es ruido
+                    if not re.search(r"SL\s*\d", upper) and not re.search(r"TP\s*\d", upper):
+                        is_ad = True
 
         # 1) ESPEJO: copia SOLO si no es anuncio
         if dest_entity and not is_ad:
@@ -579,42 +591,165 @@ async def main():
             except: pass
             return
 
-        # ABRIR - FIX: Damaris GOLD es scalping, no 24h cooldown
+        # ABRIR - FIX: Damaris GOLD es scalping, no 24h cooldown, por lado
         base = signal["base"]
+        side = signal["side"]
+        key = f"{base}_{side}_{src_label}"  # diferencia por proveedor y lado
         now = time.time()
         # Para GOLD/XAUUSD de Damaris, cooldown 5 min, no 24h
         cooldown_h = 0.083 if base in ("XAUUSD", "GOLD", "frxXAUUSD") else 24
-        if base in last_signals:
-            hours = (now - last_signals[base]) / 3600
+        if key in last_signals:
+            hours = (now - last_signals[key]) / 3600
             if hours < cooldown_h:
-                print(f"⏸️ {base} cooldown {hours*60:.1f}min < {cooldown_h*60:.0f}min, no duplico")
+                print(f"⏸️ {key} cooldown {hours*60:.1f}min < {cooldown_h*60:.0f}min, no duplico")
                 return
             else:
-                print(f"✅ {base} cooldown pasado {hours:.1f}h >= {cooldown_h}h, permito")
+                print(f"✅ {key} cooldown pasado {hours:.1f}h >= {cooldown_h}h, permito")
 
         print(f"✅ Señal parseada ABRIR [{src_label}]: {signal}")
 
         ok, out, cid = place_deriv_order(signal, stake_override=stake_use, source_label=src_label)
         if ok:
-            last_signals[base] = now
-            print(f"✅ Orden ejecutada [{src_label}] {base} cid={cid} TPs={signal.get('tps',[])} stake=${stake_use}")
-            # Guarda mapping para diferenciar en Deriv
+            last_signals[key] = now
+            print(f"✅ Orden ejecutada [{src_label}] {base} {side} cid={cid} TPs={signal.get('tps',[])} stake=${stake_use}")
+            # Guarda mapping para diferenciar en Deriv (no spamea canal origen)
             try:
                 mapping_file = "open_trades.json"
                 data = {}
                 if os.path.exists(mapping_file):
                     data = json.loads(open(mapping_file).read() or "{}")
-                data[str(cid or f'{base}_{int(now)}')] = {"source": src_label, "base": base, "side": signal['side'], "entry": signal['entry'], "sl": signal['sl'], "tp": signal['tp'], "stake": stake_use, "time": datetime.now().isoformat()}
+                data[str(cid or f'{base}_{int(now)}')] = {"source": src_label, "base": base, "side": side, "entry": signal['entry'], "sl": signal['sl'], "tp": signal['tp'], "tps": signal.get('tps',[]), "stake": stake_use, "time": datetime.now().isoformat()}
                 open(mapping_file, 'w').write(json.dumps(data, indent=2))
             except: pass
+            # Si es UK, agrega a trailing BE
+            if src_label == "UK" and cid:
+                try:
+                    uk_trailing[cid] = {
+                        "entry": signal['entry'],
+                        "sl": signal['sl'],
+                        "tps": signal.get('tps', [signal['tp']]),
+                        "side": side,
+                        "current_sl_price": signal['sl'],
+                        "be_done": False,
+                        "tp1_locked": False,
+                        "tp3_locked": False,
+                    }
+                    print(f"📈 [UK BE] Registrado {cid} para trailing: Entry {signal['entry']} TPs {signal.get('tps',[])}")
+                except: pass
             try:
-                # Envia confirmacion al chat origen
-                first_ent = entities[0] if entities else None
-                if first_ent:
-                    await client.send_message(first_ent, f"✅ [{src_label}] Ejecutada en Deriv DEMO x100: {base} {signal['side']} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} (TPs {signal.get('tps',[])}) Stake ${stake_use} | CID {cid}\nFuente: {src_label} Trades")
+                # Envia confirmacion SOLO a tu Espejo, NO al canal origen (evita ban)
+                if dest_entity:
+                    be_info = " + BE UK (TP1->BE, TP3->TP1, TP5->TP3)" if src_label == "UK" else ""
+                    await client.send_message(dest_entity, f"✅ [{src_label}] Ejecutada en Deriv DEMO x100: {base} {side} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} (TPs {signal.get('tps',[])}) Stake ${stake_use} | CID {cid}{be_info}\nFuente: {src_label} Trades")
             except: pass
         else:
-            print(f"❌ Fallo orden [{src_label}] {base}: {out[-500:]}")
+            print(f"❌ Fallo orden [{src_label}] {base} {side}: {out[-500:]}")
+            # Si falla por payout=0, intenta con stake mayor automaticamente
+            if "payout=0" in out or "InvalidContractProposal" in out:
+                print(f"⚠️ Reintentando [{src_label}] con stake mayor...")
+                retry_stake = stake_use * 1.5
+                ok2, out2, cid2 = place_deriv_order(signal, stake_override=retry_stake, source_label=src_label)
+                if ok2:
+                    last_signals[key] = now
+                    print(f"✅ Orden ejecutada en reintento [{src_label}] {base} cid={cid2} stake=${retry_stake}")
+                    try:
+                        if dest_entity:
+                            await client.send_message(dest_entity, f"✅ [{src_label}] Reintento OK en Deriv: {base} {side} Stake ${retry_stake} | CID {cid2}")
+                        if src_label == "UK" and cid2:
+                            uk_trailing[cid2] = {
+                                "entry": signal['entry'],
+                                "sl": signal['sl'],
+                                "tps": signal.get('tps', [signal['tp']]),
+                                "side": side,
+                                "current_sl_price": signal['sl'],
+                                "be_done": False,
+                                "tp1_locked": False,
+                                "tp3_locked": False,
+                            }
+                    except: pass
+                else:
+                    print(f"❌ Reintento fallo: {out2[-500:]}")
+
+    # BE TRAILING SOLO PARA UK: TP1->BE, TP3->TP1, TP5->TP3
+    uk_trailing = {}  # contract_id -> {entry, side, tps, current_sl_price, state}
+
+    async def monitor_uk_be():
+        """Monitorea posiciones UK y mueve SL a BE cada 2 TPs"""
+        print("📈 Monitor BE UK iniciado (TP1->BE, TP3->TP1, TP5->TP3)")
+        while True:
+            try:
+                await asyncio.sleep(15)
+                if not uk_trailing:
+                    continue
+                # Obtiene precio XAUUSD via yfinance o Deriv tick (simple: usa ultimo spot de propuesta)
+                # Por ahora usa API de Deriv para ticks via REST no, usa yfinance si disponible
+                try:
+                    import yfinance as yf
+                    ticker = yf.Ticker("GC=F")
+                    hist = ticker.history(period="1d", interval="1m")
+                    if len(hist) == 0:
+                        continue
+                    spot = float(hist['Close'].iloc[-1])
+                except:
+                    continue
+
+                for cid, info in list(uk_trailing.items()):
+                    entry = info['entry']
+                    side = info['side']
+                    tps = info.get('tps', [])
+                    if len(tps) < 1:
+                        continue
+                    # Ordena TPs segun lado
+                    tps_sorted = sorted(tps) if side == "BUY" else sorted(tps, reverse=True)
+                    # Estado actual
+                    current_sl = info.get('current_sl_price', info.get('sl'))
+
+                    # Logica TP1->BE, TP3->TP1, TP5->TP3
+                    # BUY: precio sube, SELL: precio baja
+                    hit_tp = 0
+                    for i, tp_price in enumerate(tps_sorted):
+                        if side == "BUY" and spot >= tp_price:
+                            hit_tp = i+1
+                        elif side == "SELL" and spot <= tp_price:
+                            hit_tp = i+1
+
+                    new_sl = None
+                    if hit_tp >= 1 and info.get('be_done') != True:
+                        new_sl = entry
+                        info['be_done'] = True
+                        print(f"🔒 [UK BE] {cid} TP1 hit ({tps_sorted[0]}) spot {spot} -> SL a BE {entry}")
+                    if hit_tp >= 3 and info.get('tp1_locked') != True:
+                        new_sl = tps_sorted[0]  # TP1
+                        info['tp1_locked'] = True
+                        print(f"🔒 [UK BE] {cid} TP3 hit ({tps_sorted[2] if len(tps_sorted)>2 else '?'}) spot {spot} -> SL a TP1 {tps_sorted[0]} (+10)")
+                    if hit_tp >= 5 and info.get('tp3_locked') != True:
+                        new_sl = tps_sorted[2] if len(tps_sorted) > 2 else None
+                        info['tp3_locked'] = True
+                        if new_sl:
+                            print(f"🔒 [UK BE] {cid} TP5 hit ({tps_sorted[4] if len(tps_sorted)>4 else '?'}) spot {spot} -> SL a TP3 {new_sl} (+30)")
+
+                    if new_sl and new_sl != current_sl:
+                        info['current_sl_price'] = new_sl
+                        # Aqui intentariamos actualizar SL en Deriv via API (contract_update)
+                        # Por ahora solo log y guarda, el cierre real se hace si precio regresa a SL
+                        print(f"📈 [UK BE] Actualizado SL {cid}: {current_sl} -> {new_sl}")
+
+                    # Si precio regresa a SL actual, cerrar en BE o con profit asegurado
+                    if side == "BUY" and spot <= info.get('current_sl_price', float('-inf')):
+                        if info.get('be_done'):
+                            print(f"💰 [UK BE] {cid} Precio {spot} toco SL {info['current_sl_price']} -> CERRAR en BE/profit")
+                            # TODO: llamar a close_deriv_contract(cid)
+                            # Por ahora marca como cerrado
+                            # uk_trailing.pop(cid, None)
+                    elif side == "SELL" and spot >= info.get('current_sl_price', float('inf')):
+                        if info.get('be_done'):
+                            print(f"💰 [UK BE] {cid} Precio {spot} toco SL {info['current_sl_price']} -> CERRAR en BE/profit")
+            except Exception as e:
+                print(f"⚠️ Monitor UK error: {e}")
+                await asyncio.sleep(5)
+
+    # Inicia monitor en background
+    asyncio.create_task(monitor_uk_be())
 
     print("👂 Escuchando mensajes 24/7... (Ctrl+C para salir)")
     await client.run_until_disconnected()
