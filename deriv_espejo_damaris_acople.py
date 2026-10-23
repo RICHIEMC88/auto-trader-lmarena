@@ -379,22 +379,27 @@ async def main():
 
         print(f"\n📩 Nuevo mensaje en Damaris: {text[:200]}...")
 
-        # FILTRO ANUNCIOS: no copiar anuncios a espejo
+        # FILTRO ANUNCIOS: deja pasar solo los que llevan @Damaris_Trader
         upper = text.upper()
         is_ad = False
-        ad_keywords = [
-            "PREMIUM GROUP", "JOIN HERE", "VIP GROUP OPEN", "LIMITED FOR FIRST",
-            "ACCOUNT MANAGEMENT SERVICE", "YOU KEEP FULL CONTROL", "NO MINIMUM",
-            "MESSAGE ME @", "I WILL DELETE THE LINK", "600+ PIPS TARGET",
-            "200+ PIPS TARGET", "FREE !!", "T.ME/+", "HTTPS://T.ME/+"
-        ]
-        for kw in ad_keywords:
-            if kw in upper:
+        # Si lleva @Damaris_Trader, NO es anuncio malo, dejalo pasar
+        if "@DAMARIS_TRADER" in upper or "@DAMARIS_TRADER" in text:
+            is_ad = False
+        else:
+            ad_keywords = [
+                "PREMIUM GROUP", "JOIN HERE", "VIP GROUP OPEN", "LIMITED FOR FIRST",
+                "YOU KEEP FULL CONTROL", "NO MINIMUM",
+                "I WILL DELETE THE LINK", "600+ PIPS TARGET",
+                "200+ PIPS TARGET", "FREE !!", "LIFETIME SUBSCRIPTION",
+                "OFFER VALID FOR", "CHOSE SIGNALS", "READY FOR VIP SIGNALS"
+            ]
+            for kw in ad_keywords:
+                if kw in upper:
+                    is_ad = True
+                    break
+            # Si tiene link de telegram y no tiene BUY/SELL y no tiene @Damaris_Trader, es anuncio
+            if ("HTTPS://T.ME/" in upper or "T.ME/+" in upper) and not ("BUY" in upper or "SELL" in upper):
                 is_ad = True
-                break
-        # Si tiene link de telegram y no tiene BUY/SELL, es anuncio
-        if ("HTTPS://T.ME/" in upper or "T.ME/+" in upper) and not ("BUY" in upper or "SELL" in upper):
-            is_ad = True
 
         # 1) ESPEJO: copia SOLO si no es anuncio
         if dest_entity and not is_ad:
