@@ -153,20 +153,14 @@ def parse_signal(text):
 
         # Si solo tiene entry tipo 4167/4164 sin TP/SL, guarda y espera siguiente mensaje con TPs
         # Por ahora retorna None para no abrir sin SL/TP, pero guarda en cache (manejado en handler)
+        # FIX 2026-10-26: YA NO se adivina el SL como "ultimo numero". Una señal valida DEBE traer
+        # SL explicito (SL / STOP LOSS + numero) y al menos un TP explicito (TP / TAKE PROFIT + numero).
+        # Antes un comentario de UK ("BUY ABOVE 3990 targets 4035 & 4055 ... SELL BELOW ... 3950")
+        # se leyo como señal real y abrio una operacion falsa.
         if not sl or not tps:
-            # Si tiene al menos 3 numeros, asume entry, TPs, SL
-            if len(nums) >= 3:
-                try:
-                    vals = [float(n) for n in nums]
-                    # Formato Damaris: GOLD BUY 4167 TP 4170 TP 4173 ... SL 4155 -> nums = [4167,4170,4173,4176,4179,4182,4155]
-                    # Entry = primero, SL = ultimo, TPs = medio
-                    if sl is None and len(vals) >= 2:
-                        sl = vals[-1]
-                    if not tps and len(vals) >= 3:
-                        tps = vals[1:-1] if len(vals) > 2 else [vals[1]]
-                    if entry is None:
-                        entry = vals[0]
-                except: pass
+            if entry or nums:
+                print(f"⏭️ GOLD sin SL/TP explicitos (SL={sl} TPs={tps}) -> no es señal operable, ignoro")
+            return None
 
         # SANITY: SL del lado correcto y TPs del lado correcto (evita leer mal formatos como UK)
         if entry and sl and tps:
@@ -482,6 +476,8 @@ async def main():
                 "1 YEARS FREE", "YEARS FREE JOIN", "REQUEST TO JOIN",
                 "OFFER VALID FOR", "CHOSE SIGNALS", "READY FOR VIP SIGNALS",
                 "VIP TODAY FREE", "MONTH SUBSCRIPTION", "CHOOSE SIGNALS",
+                "PAID CHANNEL", "JOIN FAST", "JOIN NOW", "CLICK HERE", "LINK WILL BE DELETED",
+                "FIRST 10 MEMBERS", "IF YOU HAVE 5$", "TRY FAST", "SIGNAL STRATEGY WILL",
             ]
             for kw in ad_keywords:
                 if kw in upper:
