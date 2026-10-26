@@ -274,6 +274,18 @@ async def place_order():
                          f"({abs(live_spot-ENTRY):.2f} pts = {slip*100:.3f}% > {MAX_SLIP_PCT*100:.3f}%). No abro para no entrar tarde.")
                 print(f"   slippage {abs(live_spot-ENTRY):.2f} pts ({slip*100:.3f}%) dentro del limite {MAX_SLIP_PCT*100:.3f}%")
             sl_usd, tp_usd, adj, mult = calc_usd_follow(live_spot)
+            # Compensa la comision de Deriv: el SL cuenta la comision como parte de la perdida (nivel mas cerca)
+            # y el TP es ganancia NETA de comision (nivel mas lejos). Verificado con contrato 18419562499:
+            # nivel_SL = spot - (monto_SL - comision)*spot/(stake*mult) ; nivel_TP = spot + (monto_TP + comision)*spot/(stake*mult)
+            try:
+                comm = float(rb.get("proposal", {}).get("commission", 0) or 0)
+            except Exception:
+                comm = 0.0
+            if comm > 0:
+                sl_new = min(sl_usd + comm, STAKE * 0.9)
+                tp_new = max(tp_usd - comm, MIN_USD)
+                print(f"   comision {comm} USD compensada: SL {sl_usd}->{round(sl_new,2)} | TP {tp_usd}->{round(tp_new,2)}")
+                sl_usd, tp_usd = round(sl_new, 2), round(tp_new, 2)
             proposal["limit_order"] = {"stop_loss": sl_usd, "take_profit": tp_usd}
             print(f"   spot real {live_spot} (señal decía {ENTRY}) -> SL {SL} = {sl_usd} USD | TP {TP} = {tp_usd} USD")
 
