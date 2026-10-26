@@ -135,8 +135,8 @@ def parse_signal(text):
         # Numeros de 4 digitos
         nums = re.findall(r"\d{4,5}(?:\.\d+)?", text)
         slash_match = re.search(r"(\d{4,5})/(\d{4,5})", text)
-        sl_match = re.search(r"SL\s*(\d{4,5}(?:\.\d+)?)", upper)
-        tp_matches = re.findall(r"TP\s*(\d{4,5}(?:\.\d+)?)", upper)
+        sl_match = re.search(r"(?<![A-Z])(?:SL|STOP\s*LOSS)\s*[:@\-]?\s*(\d{4,5}(?:\.\d+)?)", upper)
+        tp_matches = re.findall(r"(?:(?<![A-Z])TP\d?|TAKE\s*PROFIT)\s*[:@\-]?\s*(\d{4,5}(?:\.\d+)?)", upper)
 
         entry = None
         sl = float(sl_match.group(1)) if sl_match else None
@@ -168,6 +168,14 @@ def parse_signal(text):
                         entry = vals[0]
                 except: pass
 
+        # SANITY: SL del lado correcto y TPs del lado correcto (evita leer mal formatos como UK)
+        if entry and sl and tps:
+            tps_ok = [t for t in tps if (t > entry if side == "BUY" else t < entry)]
+            sl_ok = (sl < entry) if side == "BUY" else (sl > entry)
+            if not sl_ok or not tps_ok:
+                print(f"⚠️ Señal GOLD descartada por incoherente: {side} entry {entry} SL {sl} TPs {tps}")
+                return None
+            tps = tps_ok
         if entry and sl and tps:
             # FIX: Damaris manda TPs muy pegados (4123,4126...). Deriv rechaza TP 3$ con payout=0
             # Usamos el TP más lejano para que Deriv acepte (4135 en vez de 4123)
@@ -546,14 +554,14 @@ async def main():
                 print(f"📌 Pending entry: {pending_gold['entry']}")
 
             # Detecta TPs
-            tps = re.findall(r"TP\s*(\d{4,5}(?:\.\d+)?)", upper)
+            tps = re.findall(r"(?:(?<![A-Z])TP\d?|TAKE\s*PROFIT)\s*[:@\-]?\s*(\d{4,5}(?:\.\d+)?)", upper)
             if tps:
                 pending_gold["tps"] = [float(x) for x in tps]
                 pending_gold["ts"] = now
                 print(f"📌 Pending TPs: {pending_gold['tps']}")
 
             # Detecta SL solo (ej: \"SL 4134\")
-            m_sl = re.search(r"SL\s*(\d{4,5}(?:\.\d+)?)", upper)
+            m_sl = re.search(r"(?<![A-Z])(?:SL|STOP\s*LOSS)\s*[:@\-]?\s*(\d{4,5}(?:\.\d+)?)", upper)
             if m_sl:
                 pending_gold["sl"] = float(m_sl.group(1))
                 pending_gold["ts"] = now
