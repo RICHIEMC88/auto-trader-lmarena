@@ -225,10 +225,19 @@ async def place_order():
         payout = prop.get("payout", "?")
         spot = prop.get("spot", "?")
         print(f"✅ Cotización: id={pid} | payout={payout} | spot={spot}")
-        if not pid or payout==0 or payout=="0":
-            fail(f"buy: InvalidContractProposal - Unknown contract proposal (payout=0 id={pid} spot={spot}) - propuesta expirada o SL/TP no valido")
+        # FIX 2026-10-25: en MULTIPLICADORES el proposal trae payout=0 de forma NORMAL (no hay payout fijo).
+        # Antes el script abortaba aqui y NUNCA llegaba a comprar. Ahora solo aborta si no hay id;
+        # si la propuesta fuera invalida, Deriv responde error en el buy y se muestra completo.
+        print(f"   proposal completo: {json.dumps(prop)[:600]}")
+        if not pid:
+            fail(f"proposal sin id (spot={spot}) - respuesta: {json.dumps(r)[:400]}")
+        try:
+            ask = float(prop.get("ask_price", STAKE))
+        except Exception:
+            ask = STAKE
+        buy_price = round(max(STAKE, ask), 2)
 
-        r = await rpc(ws, {"buy": pid, "price": STAKE}, 3)
+        r = await rpc(ws, {"buy": pid, "price": buy_price}, 3)
         if "error" in r:
             fail(f"buy: {r['error'].get('code')} — {r['error'].get('message')}")
         b = r.get("buy", {})
