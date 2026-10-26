@@ -69,7 +69,12 @@ def calc_usd():
     rew_pct  = abs(TP - ENTRY) / ENTRY
 
     # FIX 2026-10-20: Damaris TP muy pegado -> payout=0
-    min_rew_pct = 0.003
+    # FIX 2026-10-22: GOLD necesita 0.5% min y 5 USD min para que Deriv no de payout=0
+    is_gold = "XAU" in SYMBOL or "GOLD" in SYMBOL or DERIV_SYMBOL == "frxXAUUSD"
+    min_rew_pct = 0.005 if is_gold else 0.003
+    min_sl_usd = 5.0 if is_gold else MIN_USD
+    min_tp_usd = 7.5 if is_gold else MIN_USD
+
     if rew_pct < min_rew_pct:
         print(f"   ⚠️ TP muy cercano {rew_pct*100:.3f}% < {min_rew_pct*100}% -> ajusto TP a {min_rew_pct*100}% para evitar payout=0")
         if SIDE == "BUY":
@@ -92,11 +97,16 @@ def calc_usd():
         tp_usd = STAKE * mult * rew_pct
 
     sl_usd, tp_usd = round(sl_usd, 2), round(tp_usd, 2)
-    if sl_usd < MIN_USD:
-        sl_usd = MIN_USD; adj = True
-    if tp_usd < MIN_USD:
-        tp_usd = max(MIN_USD, round(sl_usd * 1.5, 2))
-        print(f"   ⚠️ TP USD muy chico, ajustado a {tp_usd} USD (1.5x SL) para evitar payout=0")
+    if sl_usd < min_sl_usd:
+        print(f"   ⚠️ SL USD {sl_usd} < min {min_sl_usd} para GOLD, ajusto a {min_sl_usd}")
+        sl_usd = min_sl_usd; adj = True
+    if tp_usd < min_tp_usd:
+        tp_usd = max(min_tp_usd, round(sl_usd * 1.5, 2))
+        print(f"   ⚠️ TP USD muy chico, ajustado a {tp_usd} USD (1.5x SL, min GOLD) para evitar payout=0")
+        adj = True
+    if is_gold and tp_usd < sl_usd * 1.5:
+        tp_usd = round(sl_usd * 1.5, 2)
+        print(f"   ⚠️ Ajusto TP a 1.5x SL para GOLD: {tp_usd} USD")
         adj = True
 
     return sl_usd, tp_usd, adj, mult
@@ -215,10 +225,19 @@ async def place_order():
         payout = prop.get("payout", "?")
         spot = prop.get("spot", "?")
         print(f"✅ Cotización: id={pid} | payout={payout} | spot={spot}")
-        if not pid or payout==0 or payout=="0":
-            fail(f"buy: InvalidContractProposal - Unknown contract proposal (payout=0 id={pid} spot={spot}) - propuesta expirada o SL/TP no valido")
+        # FIX 2026-10-25: en MULTIPLICADORES el proposal trae payout=0 de forma NORMAL (no hay payout fijo).
+        # Antes el script abortaba aqui y NUNCA llegaba a comprar. Ahora solo aborta si no hay id;
+        # si la propuesta fuera invalida, Deriv responde error en el buy y se muestra completo.
+        print(f"   proposal completo: {json.dumps(prop)[:600]}")
+        if not pid:
+            fail(f"proposal sin id (spot={spot}) - respuesta: {json.dumps(r)[:400]}")
+        try:
+            ask = float(prop.get("ask_price", STAKE))
+        except Exception:
+            ask = STAKE
+        buy_price = round(max(STAKE, ask), 2)
 
-        r = await rpc(ws, {"buy": pid, "price": STAKE}, 3)
+        r = await rpc(ws, {"buy": pid, "price": buy_price}, 3)
         if "error" in r:
             fail(f"buy: {r['error'].get('code')} — {r['error'].get('message')}")
         b = r.get("buy", {})
