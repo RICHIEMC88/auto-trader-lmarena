@@ -111,6 +111,43 @@ def calc_usd():
 
     return sl_usd, tp_usd, adj, mult
 
+# FIX 2026-10-26: modo SEGUIR SEÑAL (Damaris/UK). Cuando viene de Telegram (SIGNAL_SOURCE definido),
+# SL/TP se calculan con el precio REAL (spot) al comprar, para que los precios de Deriv coincidan
+# con los de la señal. Los minimos "anti payout=0" (0.5% TP, $5 SL, 1.5x SL) se quitan en este modo
+# porque el payout=0 era un falso positivo del script, no un limite de Deriv.
+FOLLOW = bool((e("SIGNAL_SOURCE", "") or "").strip())
+# Si el precio real de Deriv se alejo mas de este % de la entrada de la señal, NO abre (entraria tarde).
+# 0.15% = ~$6 en oro. Cada broker tiene su propio precio, diferencias de $2-3 en oro son normales y pasan.
+MAX_SLIP_PCT = float(e("MAX_SLIP_PCT", "0.0015") or 0.0015)
+
+def calc_usd_follow(spot):
+    if SIDE not in CONTRACT:
+        fail(f"side inválido: {SIDE} (usa BUY o SELL)")
+    if SL <= 0 or TP <= 0 or spot <= 0:
+        fail(f"Faltan niveles: SPOT={spot} SL={SL} TP={TP}")
+    if SIDE == "BUY":
+        if spot <= SL:
+            fail(f"SEÑAL VENCIDA: precio actual {spot} ya está en/bajo el SL {SL}. No abro.")
+        if spot >= TP:
+            fail(f"SEÑAL VENCIDA: precio actual {spot} ya llegó al TP {TP}. No abro.")
+    else:
+        if spot >= SL:
+            fail(f"SEÑAL VENCIDA: precio actual {spot} ya está en/sobre el SL {SL}. No abro.")
+        if spot <= TP:
+            fail(f"SEÑAL VENCIDA: precio actual {spot} ya llegó al TP {TP}. No abro.")
+    ALLOWED_MULTS = [100, 200, 300, 500, 800, 1000]
+    mult = MULTIPLIER if MULTIPLIER in ALLOWED_MULTS else 100
+    risk_pct = abs(spot - SL) / spot
+    rew_pct = abs(TP - spot) / spot
+    sl_usd = STAKE * mult * risk_pct
+    tp_usd = STAKE * mult * rew_pct
+    adj = False
+    if sl_usd > STAKE * 0.9:
+        print(f"   ⚠️ SL equivale a {sl_usd:.2f} USD > 90% del stake -> capeado a {STAKE*0.9:.2f} USD")
+        sl_usd = STAKE * 0.9; adj = True
+    sl_usd, tp_usd = round(max(sl_usd, MIN_USD), 2), round(max(tp_usd, MIN_USD), 2)
+    return sl_usd, tp_usd, adj, mult
+
 def rest(method, path, body=None, timeout=20):
     url = REST + path
     headers = {
@@ -182,7 +219,11 @@ def get_demo_otp_ws():
     return ws_url
 
 async def place_order():
-    sl_usd, tp_usd, adj, mult = calc_usd()
+    if FOLLOW:
+        sl_usd, tp_usd, adj, mult = calc_usd_follow(ENTRY if ENTRY > 0 else (SL + TP) / 2)
+        print("   modo: SEGUIR SEÑAL (SL/TP calculados con precio real al comprar)")
+    else:
+        sl_usd, tp_usd, adj, mult = calc_usd()
     contract = CONTRACT[SIDE]
 
     print("📋 Orden preparada:")
@@ -216,6 +257,25 @@ async def place_order():
 
     async with websockets.connect(ws_url, open_timeout=20, close_timeout=5) as ws:
         print("✅ ¡WebSocket DEMO conectado! (OTP, sin authorize)")
+
+        if FOLLOW:
+            base_prop = {k: v for k, v in proposal.items() if k != "limit_order"}
+            rb = await rpc(ws, base_prop, 5)
+            if "error" in rb:
+                fail(f"proposal(spot): {rb['error'].get('code')} — {rb['error'].get('message')}")
+            try:
+                live_spot = float(rb.get("proposal", {}).get("spot"))
+            except Exception:
+                fail(f"No pude leer el spot: {json.dumps(rb)[:300]}")
+            if ENTRY > 0 and MAX_SLIP_PCT > 0:
+                slip = abs(live_spot - ENTRY) / ENTRY
+                if slip > MAX_SLIP_PCT:
+                    fail(f"SE ALEJÓ: precio Deriv {live_spot} vs entrada señal {ENTRY} "
+                         f"({abs(live_spot-ENTRY):.2f} pts = {slip*100:.3f}% > {MAX_SLIP_PCT*100:.3f}%). No abro para no entrar tarde.")
+                print(f"   slippage {abs(live_spot-ENTRY):.2f} pts ({slip*100:.3f}%) dentro del limite {MAX_SLIP_PCT*100:.3f}%")
+            sl_usd, tp_usd, adj, mult = calc_usd_follow(live_spot)
+            proposal["limit_order"] = {"stop_loss": sl_usd, "take_profit": tp_usd}
+            print(f"   spot real {live_spot} (señal decía {ENTRY}) -> SL {SL} = {sl_usd} USD | TP {TP} = {tp_usd} USD")
 
         r = await rpc(ws, proposal, 2)
         if "error" in r:
