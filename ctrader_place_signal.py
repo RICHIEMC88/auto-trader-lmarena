@@ -1,143 +1,257 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-  Ejecuta la orden en cTrader (Open API) según la señal elegida por senal_diaria.py.
-  Se invoca como SUBPROCESO (cada vez conecta, coloca la orden y sale).
-  Lee la orden de variables de entorno: CTRADER_SIDE / CTRADER_SYMBOL /
-  CTRADER_VOLUME / SIGNAL_SL / SIGNAL_TP.
-  Usa la cuenta simulada (DEMO) por defecto.
+  Ejecuta la orden en DERIV (API NUEVA 2026: PAT + OTP → WebSocket DEMO)
+  FIX 2026-09-24: symbol -> underlying_symbol
+  FIX 2026-10-20: Damaris GOLD TP muy pegado (3$) -> payout=0, ajusta a min 0.3%
 """
+import asyncio
+import json
 import os
+import time
+import urllib.error
+import urllib.request
 
-from twisted.internet import reactor
-from ctrader_open_api import Client, EndPoints, Protobuf
-from ctrader_open_api.tcpProtocol import TcpProtocol
-from ctrader_open_api.messages import OpenApiMessages_pb2 as M
-from ctrader_open_api.messages import OpenApiModelMessages_pb2 as MM
+try:
+    import websockets
+except ImportError:
+    print("❌ Falta la librería 'websockets'. Instala: pip install websockets")
+    raise SystemExit(2)
 
 def e(key, default=None):
     return os.environ.get(key, default)
 
-CLIENT_ID     = e("CTRADER_CLIENT_ID", "").strip()
-CLIENT_SECRET = e("CTRADER_CLIENT_SECRET", "").strip()
-ACCESS_TOKEN  = e("CTRADER_ACCESS_TOKEN", "").strip()
-ACCOUNT_ID    = e("CTRADER_ACCOUNT_ID", "").strip()
-ENV           = (e("CTRADER_ENV", "demo") or "demo").lower()
+API_TOKEN = (e("DERIV_API_TOKEN", "") or "").strip()
+APP_ID    = (e("DERIV_APP_ID", "") or "").strip()
+DRY_RUN   = (e("DERIV_DRY_RUN", "") or "").lower() in ("1","true","yes")
 
-SIDE          = (e("CTRADER_SIDE", "BUY") or "BUY").upper()
-SYMBOL        = (e("CTRADER_SYMBOL", "EURUSD") or "EURUSD").upper()
-VOLUME        = float(e("CTRADER_VOLUME", "0.1"))
-SIGNAL_SL     = float(e("SIGNAL_SL", "0") or 0) or None
-SIGNAL_TP     = float(e("SIGNAL_TP", "0") or 0) or None
-DECIMALS      = int(e("CTRADER_DECIMALS", "5"))
+SIDE   = (e("DERIV_SIDE", "BUY") or "BUY").upper()
+SYMBOL = (e("DERIV_SYMBOL", "AUDNZD") or "AUDNZD").upper()
 
-HOST = EndPoints.PROTOBUF_DEMO_HOST if ENV == "demo" else EndPoints.PROTOBUF_LIVE_HOST
-PORT = EndPoints.PROTOBUF_PORT
+ENTRY = float(e("SIGNAL_ENTRY", "0") or 0)
+SL    = float(e("SIGNAL_SL", "0") or 0)
+TP    = float(e("SIGNAL_TP", "0") or 0)
 
-TRADE_SIDE = {"BUY": MM.ProtoOATradeSide.BUY, "SELL": MM.ProtoOATradeSide.SELL}
-if SIDE not in TRADE_SIDE:
-    print(f"❌ side inválido: {SIDE}"); raise SystemExit(2)
+STAKE      = float(e("STAKE_USD", "10") or 10)
+MULTIPLIER = float(e("MULTIPLIER", "100") or 100)
 
-state = {"symbol_id": None, "done": False}
+ALIAS = {
+    "AUDNZD": "frxAUDNZD", "FRXAUDNZD": "frxAUDNZD",
+    "BTC": "cryBTCUSD", "BTCUSD": "cryBTCUSD", "CRYBTCUSD": "cryBTCUSD",
+    "XAU": "frxXAUUSD", "XAUUSD": "frxXAUUSD", "GOLD": "frxXAUUSD",
+    "FRXXAUUSD": "frxXAUUSD",
+}
+DERIV_SYMBOL = ALIAS.get(SYMBOL, SYMBOL)
+
+CONTRACT = {"BUY": "MULTUP", "SELL": "MULTDOWN"}
+REST = "https://api.derivws.com"
+MIN_USD = 0.35
 
 def fail(msg):
     print(f"❌ {msg}")
-    state["done"] = True
-    try: reactor.stop()
-    except Exception: pass
+    raise SystemExit(1)
 
-def success(msg):
-    print(f"✅ {msg}")
-    state["done"] = True
-    try: reactor.stop()
-    except Exception: pass
+def calc_usd():
+    global TP
+    if SIDE not in CONTRACT:
+        fail(f"side inválido: {SIDE} (usa BUY o SELL)")
+    if ENTRY <= 0 or SL <= 0 or TP <= 0:
+        fail(f"Faltan niveles: ENTRY={ENTRY} SL={SL} TP={TP}")
 
-def on_message(client, message):
-    payload = Protobuf.extract(message)
+    if SIDE == "BUY":
+        if not (SL < ENTRY < TP):
+            fail(f"BUY exige SL < entrada < TP (recibí {SL} < {ENTRY} < {TP}?)")
+    else:
+        if not (TP < ENTRY < SL):
+            fail(f"SELL exige TP < entrada < SL (recibí {TP} < {ENTRY} < {SL}?)")
 
-    if isinstance(payload, M.ProtoOAApplicationAuthRes):
-        if payload.errorCode in (0, None, ""):
-            print("✅ App autenticada.")
-            _auth_account(client)
+    risk_pct = abs(ENTRY - SL) / ENTRY
+    rew_pct  = abs(TP - ENTRY) / ENTRY
+
+    # FIX 2026-10-20: Damaris TP muy pegado -> payout=0
+    # FIX 2026-10-22: GOLD necesita 0.5% min y 5 USD min para que Deriv no de payout=0
+    is_gold = "XAU" in SYMBOL or "GOLD" in SYMBOL or DERIV_SYMBOL == "frxXAUUSD"
+    min_rew_pct = 0.005 if is_gold else 0.003
+    min_sl_usd = 5.0 if is_gold else MIN_USD
+    min_tp_usd = 7.5 if is_gold else MIN_USD
+
+    if rew_pct < min_rew_pct:
+        print(f"   ⚠️ TP muy cercano {rew_pct*100:.3f}% < {min_rew_pct*100}% -> ajusto TP a {min_rew_pct*100}% para evitar payout=0")
+        if SIDE == "BUY":
+            TP = ENTRY * (1 + min_rew_pct)
         else:
-            fail(f"Error auth app: {payload.errorCode}")
+            TP = ENTRY * (1 - min_rew_pct)
+        rew_pct = abs(TP - ENTRY) / ENTRY
 
-    elif isinstance(payload, M.ProtoOAAccountAuthRes):
-        if payload.errorCode in (0, None, ""):
-            print(f"✅ Cuenta {ACCOUNT_ID} autenticada.")
-            _get_symbols(client)
-        else:
-            fail(f"Error auth cuenta: {payload.errorCode}")
+    ALLOWED_MULTS = [100, 200, 300, 500, 800, 1000]
+    mult = MULTIPLIER if MULTIPLIER in ALLOWED_MULTS else 100
 
-    elif isinstance(payload, M.ProtoOASymbolsListRes):
-        for s in payload.symbol:
-            if s.name.upper() == SYMBOL:
-                state["symbol_id"] = s.symbolId
-                print(f"✅ Símbolo {SYMBOL} (id={s.symbolId})")
-                break
-        if state["symbol_id"] is None:
-            fail(f"No encontré el símbolo {SYMBOL} en tu cuenta.")
-        else:
-            _open_order(client)
+    adj = False
+    if risk_pct > 0 and mult * risk_pct > 0.9:
+        sl_usd = STAKE * 0.9
+        tp_usd = sl_usd * 3.0
+        adj = True
+        print(f"   ⚠️ Riesgo tecnico {risk_pct*100:.2f}% muy amplio para mult {mult} -> SL capeado a 90% stake ({sl_usd} USD)")
+    else:
+        sl_usd = STAKE * mult * risk_pct
+        tp_usd = STAKE * mult * rew_pct
 
-    elif isinstance(payload, M.ProtoOAExecutionEvent):
-        et = payload.executionType
-        if et == MM.ProtoOAExecutionType.ORDER_ACCEPTED:
-            print("📄 Orden aceptada...")
-        elif et == MM.ProtoOAExecutionType.ORDER_FILLED:
-            success(f"ORDEN EJECUTADA: {SYMBOL} {SIDE} {VOLUME} "
-                    f"@ {payload.price} | positionId={payload.positionId}")
-        elif et == MM.ProtoOAExecutionType.ORDER_REJECTED:
-            fail(f"Orden RECHAZADA: {payload.rejectionReason}")
+    sl_usd, tp_usd = round(sl_usd, 2), round(tp_usd, 2)
+    if sl_usd < min_sl_usd:
+        print(f"   ⚠️ SL USD {sl_usd} < min {min_sl_usd} para GOLD, ajusto a {min_sl_usd}")
+        sl_usd = min_sl_usd; adj = True
+    if tp_usd < min_tp_usd:
+        tp_usd = max(min_tp_usd, round(sl_usd * 1.5, 2))
+        print(f"   ⚠️ TP USD muy chico, ajustado a {tp_usd} USD (1.5x SL, min GOLD) para evitar payout=0")
+        adj = True
+    if is_gold and tp_usd < sl_usd * 1.5:
+        tp_usd = round(sl_usd * 1.5, 2)
+        print(f"   ⚠️ Ajusto TP a 1.5x SL para GOLD: {tp_usd} USD")
+        adj = True
 
-def _auth_account(client):
-    req = M.ProtoOAAccountAuthReq()
-    req.ctidTraderAccountId = int(ACCOUNT_ID)
-    req.accessToken = ACCESS_TOKEN
-    client.send(req)
+    return sl_usd, tp_usd, adj, mult
 
-def _get_symbols(client):
-    req = M.ProtoOASymbolsListReq()
-    req.ctidTraderAccountId = int(ACCOUNT_ID)
-    client.send(req)
+def rest(method, path, body=None, timeout=20):
+    url = REST + path
+    headers = {
+        "Authorization": f"Bearer {API_TOKEN}",
+        "Accept": "application/json",
+        "Deriv-App-ID": APP_ID,
+    }
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.getcode(), json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as ex:
+        raw = ex.read().decode(errors="replace")
+        try:
+            return ex.code, json.loads(raw)
+        except Exception:
+            return ex.code, {"raw": raw}
+    except Exception as ex:
+        return 0, {"error": str(ex)}
 
-def _open_order(client):
-    req = M.ProtoOANewOrderReq()
-    req.ctidTraderAccountId = int(ACCOUNT_ID)
-    req.symbolId = state["symbol_id"]
-    req.orderType = MM.ProtoOAOrderType.MARKET
-    req.tradeSide = TRADE_SIDE[SIDE]
-    req.volume = VOLUME
-    req.timeInForce = MM.ProtoOATimeInForce.GOOD_TILL_CANCEL
-    req.comment = "Senal diaria"
-    req.baseSlippagePrice = 0
-    req.slippageInPoints = 0
-    if SIGNAL_TP:
-        req.takeProfit = round(SIGNAL_TP, DECIMALS)
-    if SIGNAL_SL:
-        req.stopLoss = round(SIGNAL_SL, DECIMALS)
-    print(f"🚀 Enviando orden: {SIDE} {VOLUME} {SYMBOL} (mercado) "
-          f"SL={SIGNAL_SL} TP={SIGNAL_TP}")
-    client.send(req)
+async def rpc(ws, payload, req_id, timeout=30):
+    payload = dict(payload)
+    payload["req_id"] = req_id
+    await ws.send(json.dumps(payload))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        raw = await asyncio.wait_for(ws.recv(), timeout=max(1, deadline - time.time()))
+        data = json.loads(raw)
+        if data.get("req_id") == req_id:
+            return data
+    fail(f"Timeout esperando respuesta (req_id={req_id})")
 
-def run():
-    if not (CLIENT_ID and CLIENT_SECRET and ACCESS_TOKEN and ACCOUNT_ID):
-        print("❌ Faltan credenciales cTrader. Revisa variables de entorno.")
+def get_demo_otp_ws():
+    print(f"🔐 [DEMO-ONLY] REST con PAT | Deriv-App-ID={APP_ID[:6]}...")
+    code, data = rest("GET", "/trading/v1/options/accounts")
+    print(f"   GET /accounts -> HTTP {code}")
+    if code != 200:
+        fail(f"accounts: {data.get('errors') or data}")
+
+    accounts = data.get("data") or []
+    if isinstance(accounts, dict):
+        accounts = [accounts]
+
+    demo = None
+    for a in accounts:
+        tipo = a.get("account_type", "?")
+        mark = "✅" if tipo == "demo" else "🔒"
+        print(f"   {mark} {a.get('account_id')} [{tipo}] saldo={a.get('balance')} {a.get('currency', '')}")
+        if tipo == "demo" and demo is None:
+            demo = a
+    if not demo:
+        fail("No hay cuenta account_type='demo'. NO opero (solo demo).")
+
+    acc_id = demo.get("account_id")
+    print(f"✅ Cuenta DEMO: {acc_id} (saldo {demo.get('balance')})")
+
+    code, data = rest("POST", f"/trading/v1/options/accounts/{acc_id}/otp")
+    print(f"   POST /otp -> HTTP {code}")
+    if code != 200:
+        fail(f"otp: {data.get('errors') or data}")
+    ws_url = (data.get("data") or {}).get("url")
+    if not ws_url:
+        fail(f"otp sin url: {data}")
+    print(f"✅ OTP listo -> {ws_url.split('?')[0]}?otp=***")
+    return ws_url
+
+async def place_order():
+    sl_usd, tp_usd, adj, mult = calc_usd()
+    contract = CONTRACT[SIDE]
+
+    print("📋 Orden preparada:")
+    print(f"   símbolo     : {DERIV_SYMBOL}")
+    print(f"   contrato    : {contract} ({'arriba' if SIDE == 'BUY' else 'abajo'})")
+    print(f"   entrada     : {ENTRY}")
+    print(f"   SL precio   : {SL}  ->  stop_loss  = {sl_usd} USD")
+    print(f"   TP precio   : {TP}  ->  take_profit = {tp_usd} USD  (R:R 1:{tp_usd / sl_usd:.2f})")
+    print(f"   stake       : {STAKE} USD × multiplicador {mult:g}")
+
+    if DRY_RUN:
+        print("✅ DRY_RUN=1: orden NO enviada (solo simulación).")
         return
-    client = Client(HOST, PORT, TcpProtocol)
-    client.setMessageReceivedCallback(on_message)
+    if not API_TOKEN:
+        fail("Falta DERIV_API_TOKEN")
+    if not APP_ID:
+        fail("Falta DERIV_APP_ID")
 
-    def _connected(c):
-        print(f"🔌 Conectado a {HOST}:{PORT} ({ENV})")
-        req = M.ProtoOAApplicationAuthReq()
-        req.clientId = CLIENT_ID
-        req.clientSecret = CLIENT_SECRET
-        c.send(req)
+    ws_url = get_demo_otp_ws()
 
-    client.setConnectedCallback(_connected)
-    client.setDisconnectedCallback(lambda _c, r: print("🔌 Desconectado:", r))
-    client.startService()
-    reactor.run()
+    proposal = {
+        "proposal": 1,
+        "amount": STAKE,
+        "basis": "stake",
+        "contract_type": contract,
+        "currency": "USD",
+        "multiplier": mult,
+        "underlying_symbol": DERIV_SYMBOL,
+        "limit_order": {"stop_loss": sl_usd, "take_profit": tp_usd},
+    }
+
+    async with websockets.connect(ws_url, open_timeout=20, close_timeout=5) as ws:
+        print("✅ ¡WebSocket DEMO conectado! (OTP, sin authorize)")
+
+        r = await rpc(ws, proposal, 2)
+        if "error" in r:
+            fail(f"proposal: {r['error'].get('code')} — {r['error'].get('message')} — {r['error']}")
+        prop = r.get("proposal", {})
+        pid = prop.get("id")
+        payout = prop.get("payout", "?")
+        spot = prop.get("spot", "?")
+        print(f"✅ Cotización: id={pid} | payout={payout} | spot={spot}")
+        # FIX 2026-10-25: en MULTIPLICADORES el proposal trae payout=0 de forma NORMAL (no hay payout fijo).
+        # Antes el script abortaba aqui y NUNCA llegaba a comprar. Ahora solo aborta si no hay id;
+        # si la propuesta fuera invalida, Deriv responde error en el buy y se muestra completo.
+        print(f"   proposal completo: {json.dumps(prop)[:600]}")
+        if not pid:
+            fail(f"proposal sin id (spot={spot}) - respuesta: {json.dumps(r)[:400]}")
+        try:
+            ask = float(prop.get("ask_price", STAKE))
+        except Exception:
+            ask = STAKE
+        buy_price = round(max(STAKE, ask), 2)
+
+        r = await rpc(ws, {"buy": pid, "price": buy_price}, 3)
+        if "error" in r:
+            fail(f"buy: {r['error'].get('code')} — {r['error'].get('message')}")
+        b = r.get("buy", {})
+        cid = b.get("contract_id")
+        paid = b.get("buy_price", STAKE)
+        print(f"🚀 ORDEN EJECUTADA (DEMO): {DERIV_SYMBOL} {contract} | stake={paid} USD | mult={mult:g} | SL={sl_usd} TP={tp_usd} USD | contract_id={cid}")
+
+def main():
+    try:
+        asyncio.run(place_order())
+    except SystemExit:
+        raise
+    except Exception as ex:
+        fail(f"{type(ex).__name__}: {ex}")
 
 if __name__ == "__main__":
-    run()
+    main()
