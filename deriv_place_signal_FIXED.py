@@ -21,6 +21,10 @@ except ImportError:
 def e(key, default=None):
     return os.environ.get(key, default)
 
+T0 = time.time()
+def tlog(msg):
+    print(f"   ⏱ +{time.time()-T0:.1f}s {msg}", flush=True)
+
 API_TOKEN = (e("DERIV_API_TOKEN", "") or "").strip()
 APP_ID    = (e("DERIV_APP_ID", "") or "").strip()
 DRY_RUN   = (e("DERIV_DRY_RUN", "") or "").lower() in ("1","true","yes")
@@ -119,6 +123,8 @@ FOLLOW = bool((e("SIGNAL_SOURCE", "") or "").strip())
 # Si el precio real de Deriv se alejo mas de este % de la entrada de la señal, NO abre (entraria tarde).
 # 0.15% = ~$6 en oro. Cada broker tiene su propio precio, diferencias de $2-3 en oro son normales y pasan.
 MAX_SLIP_PCT = float(e("MAX_SLIP_PCT", "0.0015") or 0.0015)
+# Despues de comprar, corrige SL/TP con el precio de entrada REAL del contrato (1 = si, 0 = no)
+POST_FILL_FIX = (e("POST_FILL_FIX", "1") or "1") != "0"
 
 def calc_usd_follow(spot):
     if SIDE not in CONTRACT:
@@ -184,10 +190,21 @@ async def rpc(ws, payload, req_id, timeout=30):
             return data
     fail(f"Timeout esperando respuesta (req_id={req_id})")
 
+def rest_r(method, path, body=None, tries=3, timeout=8):
+    """REST con timeout corto y reintentos (antes 1 intento de 20s: un timeout costaba >20s)."""
+    code, data = 0, {}
+    for i in range(tries):
+        code, data = rest(method, path, body, timeout=timeout)
+        if code != 0:
+            return code, data
+        print(f"   ⚠️ {method} {path.split('/')[-1]} sin respuesta (intento {i+1}/{tries}): {data.get('error')}", flush=True)
+        time.sleep(0.5)
+    return code, data
+
 def get_demo_otp_ws():
     print(f"🔐 [DEMO-ONLY] REST con PAT | Deriv-App-ID={APP_ID[:6]}...")
-    code, data = rest("GET", "/trading/v1/options/accounts")
-    print(f"   GET /accounts -> HTTP {code}")
+    code, data = rest_r("GET", "/trading/v1/options/accounts")
+    tlog(f"GET /accounts -> HTTP {code}")
     if code != 200:
         fail(f"accounts: {data.get('errors') or data}")
 
@@ -208,8 +225,8 @@ def get_demo_otp_ws():
     acc_id = demo.get("account_id")
     print(f"✅ Cuenta DEMO: {acc_id} (saldo {demo.get('balance')})")
 
-    code, data = rest("POST", f"/trading/v1/options/accounts/{acc_id}/otp")
-    print(f"   POST /otp -> HTTP {code}")
+    code, data = rest_r("POST", f"/trading/v1/options/accounts/{acc_id}/otp")
+    tlog(f"POST /otp -> HTTP {code}")
     if code != 200:
         fail(f"otp: {data.get('errors') or data}")
     ws_url = (data.get("data") or {}).get("url")
@@ -217,6 +234,27 @@ def get_demo_otp_ws():
         fail(f"otp sin url: {data}")
     print(f"✅ OTP listo -> {ws_url.split('?')[0]}?otp=***")
     return ws_url
+
+async def open_ws(tries=3):
+    """OTP + WebSocket con timeout corto (8s) y reintentos con OTP nuevo."""
+    last = None
+    for i in range(tries):
+        ws_url = get_demo_otp_ws()
+        try:
+            ws = await websockets.connect(ws_url, open_timeout=8, close_timeout=5)
+            tlog("WebSocket conectado")
+            return ws
+        except Exception as ex:
+            last = ex
+            print(f"   ⚠️ WebSocket no conecto (intento {i+1}/{tries}): {type(ex).__name__} {ex!r}", flush=True)
+            await asyncio.sleep(0.5)
+    fail(f"No pude conectar al WebSocket de Deriv tras {tries} intentos: {type(last).__name__} {last!r}")
+
+async def rpc_safe(ws, payload, req_id, timeout=8):
+    try:
+        return await rpc(ws, payload, req_id, timeout=timeout)
+    except (Exception, SystemExit) as ex:
+        return {"error": {"code": "local", "message": f"{type(ex).__name__} {ex}"}}
 
 async def place_order():
     if FOLLOW:
@@ -242,8 +280,6 @@ async def place_order():
     if not APP_ID:
         fail("Falta DERIV_APP_ID")
 
-    ws_url = get_demo_otp_ws()
-
     proposal = {
         "proposal": 1,
         "amount": STAKE,
@@ -255,7 +291,8 @@ async def place_order():
         "limit_order": {"stop_loss": sl_usd, "take_profit": tp_usd},
     }
 
-    async with websockets.connect(ws_url, open_timeout=20, close_timeout=5) as ws:
+    ws = await open_ws()
+    try:
         print("✅ ¡WebSocket DEMO conectado! (OTP, sin authorize)")
 
         if FOLLOW:
@@ -273,6 +310,7 @@ async def place_order():
                     fail(f"SE ALEJÓ: precio Deriv {live_spot} vs entrada señal {ENTRY} "
                          f"({abs(live_spot-ENTRY):.2f} pts = {slip*100:.3f}% > {MAX_SLIP_PCT*100:.3f}%). No abro para no entrar tarde.")
                 print(f"   slippage {abs(live_spot-ENTRY):.2f} pts ({slip*100:.3f}%) dentro del limite {MAX_SLIP_PCT*100:.3f}%")
+            tlog(f"proposal(spot) recibido, spot={live_spot}")
             sl_usd, tp_usd, adj, mult = calc_usd_follow(live_spot)
             # Compensa la comision de Deriv: el SL cuenta la comision como parte de la perdida (nivel mas cerca)
             # y el TP es ganancia NETA de comision (nivel mas lejos). Verificado con contrato 18419562499:
@@ -316,6 +354,53 @@ async def place_order():
         cid = b.get("contract_id")
         paid = b.get("buy_price", STAKE)
         print(f"🚀 ORDEN EJECUTADA (DEMO): {DERIV_SYMBOL} {contract} | stake={paid} USD | mult={mult:g} | SL={sl_usd} TP={tp_usd} USD | contract_id={cid}")
+        tlog("compra confirmada")
+
+        # CORRECCION POST-COMPRA (solo modo SEGUIR SEÑAL): el precio se mueve entre la cotizacion y el fill.
+        # Con el entry_spot REAL del contrato, recalcula los montos para que SL/TP queden en los niveles de la señal.
+        if FOLLOW and cid and POST_FILL_FIX:
+            try:
+                entry_real = None
+                for _ in range(4):
+                    rp = await rpc_safe(ws, {"proposal_open_contract": 1, "contract_id": int(cid)}, 9, timeout=6)
+                    poc = rp.get("proposal_open_contract") or {}
+                    try:
+                        entry_real = float(poc.get("entry_spot") or poc.get("entry_tick") or 0) or None
+                    except Exception:
+                        entry_real = None
+                    if entry_real: break
+                    await asyncio.sleep(0.6)
+                if not entry_real:
+                    print("   ⚠️ post-fill: no pude leer entry_spot, dejo SL/TP como quedaron")
+                else:
+                    notional = float(paid) * mult if paid else STAKE * mult
+                    comm2 = comm
+                    sl_loss = notional * abs(entry_real - SL) / entry_real
+                    tp_gain = notional * abs(TP - entry_real) / entry_real
+                    bad = (SIDE == "BUY" and (entry_real <= SL or entry_real >= TP)) or \
+                          (SIDE == "SELL" and (entry_real >= SL or entry_real <= TP))
+                    sl_fix = round(min(sl_loss + comm2, STAKE * 0.9), 2)
+                    tp_fix = round(max(tp_gain - comm2, MIN_USD), 2)
+                    print(f"   post-fill: entry real {entry_real} (cotizado {live_spot}) -> SL {SL}: {sl_usd}->{sl_fix} USD | TP {TP}: {tp_usd}->{tp_fix} USD")
+                    if bad:
+                        print("   ⚠️ post-fill: el entry real ya quedo fuera de SL/TP, no corrijo")
+                    elif abs(sl_fix - sl_usd) < 0.05 and abs(tp_fix - tp_usd) < 0.05:
+                        print("   post-fill: diferencia minima, no hace falta corregir")
+                    else:
+                        ru = await rpc_safe(ws, {"contract_update": 1, "contract_id": int(cid),
+                                                 "limit_order": {"stop_loss": sl_fix, "take_profit": tp_fix}}, 10, timeout=8)
+                        if "error" in ru:
+                            print(f"   ⚠️ post-fill contract_update fallo: {ru.get('error')}")
+                        else:
+                            print(f"   ✅ post-fill: SL/TP corregidos al entry real -> SL {sl_fix} USD | TP {tp_fix} USD")
+                    tlog("post-fill terminado")
+            except Exception as ex:
+                print(f"   ⚠️ post-fill error (la orden sigue abierta): {type(ex).__name__} {ex!r}")
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 def main():
     try:
