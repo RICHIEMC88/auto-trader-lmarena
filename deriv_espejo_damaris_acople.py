@@ -476,6 +476,13 @@ async def main():
         elif has_at_damaris:
             is_ad = False
             print(f"✅ Contiene @Damaris_Trader, no es anuncio: {text[:80]}...")
+        elif is_valid_signal and any(b in upper for b in (
+                "T.ME/", "HTTPS://", "HTTP://", "JOIN FAST", "JOIN NOW", "VIP GROUP", "PREMIUM GROUP",
+                "OPEN FOR", "LINK EXPIRE", "LINK WILL BE", "CLICK HERE", "REQUEST TO JOIN", "PAID CHANNEL",
+                "FIRST 10 MEMBERS", "FREE JOIN", "JOIN HERE")):
+            # ANZUELO: parece señal con SL/TP pero trae link/invitacion de grupo VIP = anuncio, NO operar
+            is_ad = True
+            print(f"🚫 ANUNCIO disfrazado de señal (link/JOIN/VIP) -> no opero ni copio: {text[:80]}...")
         elif is_valid_signal:
             is_ad = False  # señal real, no filtrar aunque contenga "300 PIPS"
         else:
@@ -531,6 +538,10 @@ async def main():
                 print(f"⚠️ Fallo copia espejo: {ce}")
         elif is_ad:
             print(f"🚫 Anuncio detectado, no copio a espejo: {text[:100]}...")
+
+        # Anuncio = no opera, no alimenta pendientes
+        if is_ad:
+            return
 
         # 2) INTENTO PARSE DIRECTO (todo en 1 mensaje)
         signal = parse_signal(text)
