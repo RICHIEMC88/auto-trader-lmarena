@@ -35,6 +35,18 @@ Despliegue: puede correr en el mismo Railway worker junto a mirror.py o como ser
 import os, re, sys, time, asyncio, subprocess, json
 from datetime import datetime
 
+# FIX: el acople guardaba su mapa en open_trades.json (formato dict) y rompia a forex v25 (espera lista).
+# Ahora usa signal_map.json y limpia el open_trades.json danado si es dict.
+try:
+    if os.path.exists("open_trades.json"):
+        _chk = json.loads(open("open_trades.json").read() or "[]")
+        if isinstance(_chk, dict):
+            open("open_trades.json", "w").write("[]")
+            print("[FIX] open_trades.json estaba en formato dict, reiniciado a lista vacia")
+except Exception as _ex:
+    try: open("open_trades.json", "w").write("[]")
+    except Exception: pass
+
 # Intenta importar telethon
 try:
     from telethon import TelegramClient, events
@@ -630,7 +642,7 @@ async def main():
             print(f"✅ Orden ejecutada [{src_label}] {base} {side} cid={cid} TPs={signal.get('tps',[])} stake=${stake_use}")
             # Guarda mapping para diferenciar en Deriv (no spamea canal origen)
             try:
-                mapping_file = "open_trades.json"
+                mapping_file = "signal_map.json"
                 data = {}
                 if os.path.exists(mapping_file):
                     data = json.loads(open(mapping_file).read() or "{}")
@@ -686,82 +698,173 @@ async def main():
                 else:
                     print(f"❌ Reintento fallo: {out2[-500:]}")
 
-    # BE TRAILING SOLO PARA UK: TP1->BE, TP3->TP1, TP5->TP3
-    uk_trailing = {}  # contract_id -> {entry, side, tps, current_sl_price, state}
+    # BE TRAILING SOLO PARA UK: TP1->BE, TP3->TP1, TP5->TP3  (REAL: opera en Deriv)
+    uk_trailing = {}  # contract_id -> {entry, side, tps, current_sl_price, stage, lock}
+    UK_TRAIL_FILE = "uk_trailing.json"
+    UK_POLL_SEC = float(e("UK_BE_POLL_SEC", "5") or 5)
+    BE_BACKUP_LOSS_PCT = float(e("BE_BACKUP_LOSS_PCT", "0.04") or 0.04)  # SL nativo de respaldo al llegar a TP1 (4% del stake)
+    # Operacion UK ya abierta antes de este parche (se retira sola cuando Deriv la reporte cerrada)
+    UK_SEED = {
+        "18429612179": {"entry": 4004.0, "sl": 3994.0, "tps": [4014.0, 4024.0, 4034.0, 4044.0, 4054.0, 4064.0],
+                        "side": "BUY", "current_sl_price": 3994.0},
+    }
+    try:
+        if os.path.exists(UK_TRAIL_FILE):
+            uk_trailing.update(json.loads(open(UK_TRAIL_FILE).read() or "{}"))
+    except Exception as _ex:
+        print(f"⚠️ [UK BE] no pude leer {UK_TRAIL_FILE}: {_ex}")
+    for _k, _v in UK_SEED.items():
+        uk_trailing.setdefault(_k, dict(_v))
+
+    DERIV_REST = "https://api.derivws.com"
+
+    def _deriv_rest(meth, path, body=None, timeout=15):
+        import urllib.request, urllib.error
+        headers = {"Authorization": f"Bearer {(e('DERIV_API_TOKEN','') or '').strip()}", "Accept": "application/json",
+                   "Deriv-App-ID": (e('DERIV_APP_ID', '') or '').strip()}
+        data = json.dumps(body).encode() if body else None
+        if data: headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(DERIV_REST + path, data=data, headers=headers, method=meth)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.getcode(), json.loads(resp.read().decode() or "{}")
+        except urllib.error.HTTPError as ex:
+            raw = ex.read().decode(errors="replace")
+            try: return ex.code, json.loads(raw)
+            except Exception: return ex.code, {"raw": raw}
+        except Exception as ex:
+            return 0, {"error": str(ex)}
+
+    async def _deriv_connect():
+        import websockets
+        code, data = await asyncio.to_thread(_deriv_rest, "GET", "/trading/v1/options/accounts")
+        if code != 200: raise RuntimeError(f"accounts HTTP {code}: {data}")
+        accs = data.get("data") or []
+        demo = next((a for a in accs if a.get("account_type") == "demo"), None)
+        if not demo: raise RuntimeError("sin cuenta demo")
+        code, data = await asyncio.to_thread(_deriv_rest, "POST", f"/trading/v1/options/accounts/{demo.get('account_id')}/otp")
+        if code != 200: raise RuntimeError(f"otp HTTP {code}: {data}")
+        ws_url = (data.get("data") or {}).get("url")
+        if not ws_url: raise RuntimeError("otp sin url")
+        return await websockets.connect(ws_url, open_timeout=20, close_timeout=5)
+
+    _rid = [1000]
+    async def _deriv_rpc(ws, payload, timeout=20):
+        _rid[0] += 1
+        rid = _rid[0]
+        payload = dict(payload); payload["req_id"] = rid
+        await ws.send(json.dumps(payload))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            d = json.loads(raw)
+            if d.get("req_id") == rid: return d
+        return {"error": {"message": "timeout rpc"}}
+
+    def _save_trailing():
+        try: open(UK_TRAIL_FILE, "w").write(json.dumps(uk_trailing, indent=2))
+        except Exception: pass
+
+    async def _notify(msg):
+        try:
+            if dest_entity: await client.send_message(dest_entity, msg)
+        except Exception: pass
 
     async def monitor_uk_be():
-        """Monitorea posiciones UK y mueve SL a BE cada 2 TPs"""
-        print("📈 Monitor BE UK iniciado (TP1->BE, TP3->TP1, TP5->TP3)")
+        """Mueve la proteccion en Deriv: TP1->BE, TP3->TP1, TP5->TP3.
+        BE: SL nativo de respaldo (contract_update) + stop virtual (vende a mercado si el precio regresa al nivel).
+        TP3/TP5: Deriv no permite SL en ganancia -> stop virtual con venta a mercado."""
+        print("📈 Monitor BE UK iniciado (TP1->BE, TP3->TP1, TP5->TP3) - modo REAL Deriv (precio spot de Deriv)")
+        ws = None
+        fails = {}
         while True:
             try:
-                await asyncio.sleep(15)
+                await asyncio.sleep(UK_POLL_SEC)
                 if not uk_trailing:
+                    if ws is not None:
+                        try: await ws.close()
+                        except Exception: pass
+                        ws = None
                     continue
-                # Obtiene precio XAUUSD via yfinance o Deriv tick (simple: usa ultimo spot de propuesta)
-                # Por ahora usa API de Deriv para ticks via REST no, usa yfinance si disponible
-                try:
-                    import yfinance as yf
-                    ticker = yf.Ticker("GC=F")
-                    hist = ticker.history(period="1d", interval="1m")
-                    if len(hist) == 0:
-                        continue
-                    spot = float(hist['Close'].iloc[-1])
-                except:
-                    continue
-
+                if ws is None:
+                    ws = await _deriv_connect()
                 for cid, info in list(uk_trailing.items()):
-                    entry = info['entry']
                     side = info['side']
-                    tps = info.get('tps', [])
-                    if len(tps) < 1:
+                    tps = info.get('tps') or []
+                    if not tps: 
+                        uk_trailing.pop(cid, None); continue
+                    r = await _deriv_rpc(ws, {"proposal_open_contract": 1, "contract_id": int(cid)})
+                    if "error" in r:
+                        fails[cid] = fails.get(cid, 0) + 1
+                        print(f"⚠️ [UK BE] {cid} error poc ({fails[cid]}): {r.get('error')}")
+                        if fails[cid] >= 8:
+                            print(f"🗑️ [UK BE] {cid} dejo de responder, lo saco del seguimiento")
+                            uk_trailing.pop(cid, None); _save_trailing()
+                        if "message" in (r.get("error") or {}) and "timeout" in str(r.get("error")):
+                            try: await ws.close()
+                            except Exception: pass
+                            ws = None; break
                         continue
-                    # Ordena TPs segun lado
+                    fails[cid] = 0
+                    poc = r.get("proposal_open_contract") or {}
+                    if poc.get("is_sold") or poc.get("is_expired") or poc.get("status") in ("sold", "won", "lost"):
+                        print(f"✅ [UK BE] {cid} ya cerrado en Deriv (profit {poc.get('profit')}), fin del seguimiento")
+                        uk_trailing.pop(cid, None); _save_trailing()
+                        continue
+                    try: spot = float(poc.get("current_spot"))
+                    except Exception: continue
+                    try: entry_spot = float(poc.get("entry_spot") or poc.get("entry_tick") or info['entry'])
+                    except Exception: entry_spot = float(info['entry'])
+                    try: stake = float(poc.get("buy_price") or 0)
+                    except Exception: stake = 0.0
+
                     tps_sorted = sorted(tps) if side == "BUY" else sorted(tps, reverse=True)
-                    # Estado actual
-                    current_sl = info.get('current_sl_price', info.get('sl'))
-
-                    # Logica TP1->BE, TP3->TP1, TP5->TP3
-                    # BUY: precio sube, SELL: precio baja
-                    hit_tp = 0
+                    hit = 0
                     for i, tp_price in enumerate(tps_sorted):
-                        if side == "BUY" and spot >= tp_price:
-                            hit_tp = i+1
-                        elif side == "SELL" and spot <= tp_price:
-                            hit_tp = i+1
-
-                    new_sl = None
-                    if hit_tp >= 1 and info.get('be_done') != True:
-                        new_sl = entry
+                        if (side == "BUY" and spot >= tp_price) or (side == "SELL" and spot <= tp_price):
+                            hit = i + 1
+                    stage = 5 if hit >= 5 else 3 if hit >= 3 else 1 if hit >= 1 else 0
+                    if stage > int(info.get('stage', 0)):
+                        lock = entry_spot if stage == 1 else (tps_sorted[0] if stage == 3 else tps_sorted[min(2, len(tps_sorted) - 1)])
+                        info['stage'] = stage; info['lock'] = lock; info['current_sl_price'] = lock
                         info['be_done'] = True
-                        print(f"🔒 [UK BE] {cid} TP1 hit ({tps_sorted[0]}) spot {spot} -> SL a BE {entry}")
-                    if hit_tp >= 3 and info.get('tp1_locked') != True:
-                        new_sl = tps_sorted[0]  # TP1
-                        info['tp1_locked'] = True
-                        print(f"🔒 [UK BE] {cid} TP3 hit ({tps_sorted[2] if len(tps_sorted)>2 else '?'}) spot {spot} -> SL a TP1 {tps_sorted[0]} (+10)")
-                    if hit_tp >= 5 and info.get('tp3_locked') != True:
-                        new_sl = tps_sorted[2] if len(tps_sorted) > 2 else None
-                        info['tp3_locked'] = True
-                        if new_sl:
-                            print(f"🔒 [UK BE] {cid} TP5 hit ({tps_sorted[4] if len(tps_sorted)>4 else '?'}) spot {spot} -> SL a TP3 {new_sl} (+30)")
+                        lbl = {1: "BE (entrada real)", 3: "TP1", 5: "TP3"}[stage]
+                        print(f"🔒 [UK BE] {cid} TP{stage} alcanzado (spot {spot}) -> proteccion a {lbl} {lock}")
+                        extra = ""
+                        if stage == 1 and stake > 0:
+                            loss_amt = round(max(0.5, stake * BE_BACKUP_LOSS_PCT), 2)
+                            ru = await _deriv_rpc(ws, {"contract_update": 1, "contract_id": int(cid), "limit_order": {"stop_loss": loss_amt}})
+                            if "error" in ru:
+                                print(f"⚠️ [UK BE] {cid} contract_update SL respaldo fallo: {ru.get('error')}")
+                                extra = " (SL nativo no actualizado, uso stop virtual)"
+                            else:
+                                print(f"📈 [UK BE] {cid} SL nativo de respaldo -> perdida max ${loss_amt}")
+                                extra = f" + SL nativo respaldo -${loss_amt}"
+                        _save_trailing()
+                        await _notify(f"🔒 [UK BE] {cid} TP{stage} hit (spot {spot}). Proteccion en {lbl} {lock}{extra}")
 
-                    if new_sl and new_sl != current_sl:
-                        info['current_sl_price'] = new_sl
-                        # Aqui intentariamos actualizar SL en Deriv via API (contract_update)
-                        # Por ahora solo log y guarda, el cierre real se hace si precio regresa a SL
-                        print(f"📈 [UK BE] Actualizado SL {cid}: {current_sl} -> {new_sl}")
-
-                    # Si precio regresa a SL actual, cerrar en BE o con profit asegurado
-                    if side == "BUY" and spot <= info.get('current_sl_price', float('-inf')):
-                        if info.get('be_done'):
-                            print(f"💰 [UK BE] {cid} Precio {spot} toco SL {info['current_sl_price']} -> CERRAR en BE/profit")
-                            # TODO: llamar a close_deriv_contract(cid)
-                            # Por ahora marca como cerrado
-                            # uk_trailing.pop(cid, None)
-                    elif side == "SELL" and spot >= info.get('current_sl_price', float('inf')):
-                        if info.get('be_done'):
-                            print(f"💰 [UK BE] {cid} Precio {spot} toco SL {info['current_sl_price']} -> CERRAR en BE/profit")
-            except Exception as e:
-                print(f"⚠️ Monitor UK error: {e}")
+                    lock = info.get('lock')
+                    if lock is not None:
+                        crossed = (side == "BUY" and spot <= lock) or (side == "SELL" and spot >= lock)
+                        if crossed:
+                            print(f"💰 [UK BE] {cid} spot {spot} toco proteccion {lock} -> VENDIENDO a mercado")
+                            rs = await _deriv_rpc(ws, {"sell": int(cid), "price": 0})
+                            if "error" in rs:
+                                print(f"❌ [UK BE] {cid} venta fallo: {rs.get('error')}")
+                            else:
+                                sold = rs.get("sell") or {}
+                                print(f"✅ [UK BE] {cid} vendido: sell_price={sold.get('sold_for') or sold.get('sell_price')}")
+                                await _notify(f"✅ [UK BE] {cid} cerrado por proteccion {lock} (spot {spot}). Vendido: {sold.get('sold_for') or sold.get('sell_price')}")
+                                uk_trailing.pop(cid, None); _save_trailing()
+                _save_trailing()
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                print(f"⚠️ Monitor UK error: {ex}")
+                try:
+                    if ws is not None: await ws.close()
+                except Exception: pass
+                ws = None
                 await asyncio.sleep(5)
 
     # Inicia monitor en background
