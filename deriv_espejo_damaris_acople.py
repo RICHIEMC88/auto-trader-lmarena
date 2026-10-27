@@ -79,6 +79,24 @@ STAKE_DAMARIS = float(e("STAKE_DAMARIS", str(STAKE_USD)) or STAKE_USD)  # $10 pa
 STAKE_UK = float(e("STAKE_UK","12") or 12)  # $12 para UK - asi los diferencias en Deriv
 DRY_RUN = (e("DRY_RUN","0") or "0").lower() in ("1","true","yes")
 
+# Fuentes extra (2026-10-26): XAUUSD TRADING CLUB y Sniper Zone (ICT+CRT). Stake distinto para identificarlas en Deriv.
+STAKE_XCLUB = float(e("STAKE_XCLUB", "15") or 15)
+STAKE_SNIPER = float(e("STAKE_SNIPER", "30") or 30)
+EXTRA_SOURCES = {
+    "XCLUB": (e("XCLUB_CHAT_ID", "-1001198197283") or "").strip(),
+    "SNIPER": (e("SNIPER_CHAT_ID", "-1001466455099") or "").strip(),
+}
+EXTRA_LABELS = tuple(EXTRA_SOURCES.keys())
+BE_SOURCES = ("UK", "XCLUB", "SNIPER")   # fuentes con BE trailing
+# BE adaptado a señales con TPs muy pegados (XCLUB/SNIPER): el BE sube 1 TP mas tarde (TP2 en vez de TP1)
+# y se deja 1 punto de aire para que el spread/ruido no lo saque en 0.
+BE_SHIFT_EXTRA = int(e("BE_SHIFT_EXTRA", "1") or 1)
+BE_BUFFER_EXTRA = float(e("BE_BUFFER_EXTRA", "1.0") or 1.0)
+def be_params(label):
+    if label in EXTRA_LABELS:
+        return {"shift": BE_SHIFT_EXTRA, "buffer": BE_BUFFER_EXTRA, "src": label}
+    return {"shift": 0, "buffer": 0.0, "src": label}
+
 # Mapeo simbolos Damaris -> Deriv
 SYMBOL_ALIAS = {
     "EURUSD": "frxEURUSD", "EUR/USD": "frxEURUSD",
@@ -117,6 +135,24 @@ SIGNAL_REGEX = re.compile(
 # Regex alternativo simple: solo busca 3 numeros en orden entry, sl, tp
 NUMBERS_REGEX = re.compile(r"(\d+\.\d+|\d+)")
 
+# Handles propios que PUEDEN aparecer dentro de una señal real (firma del canal)
+EXTRA_OWN_HANDLES = {"XCLUB": ("@XAUUSDTRADING000",), "SNIPER": ()}
+EXTRA_AD_WORDS = ("T.ME/", "HTTP", "JOIN", "VIP", "DISCOUNT", "SUBSCRIPTION", "LIFETIME")
+
+def extra_is_ad(label, text):
+    """True si el mensaje de XCLUB/SNIPER es anuncio (otro @, link o palabras de venta VIP)."""
+    upper = text.upper()
+    own = EXTRA_OWN_HANDLES.get(label, ())
+    for h in re.findall(r"@\s?[A-Za-z0-9_]{4,}", upper):
+        h = h.replace(" ", "")
+        if h not in own:
+            return True
+    return any(w in upper for w in EXTRA_AD_WORDS)
+
+# TP flexible: "TP 4009", "TP1 4025", "Tp-1 4014", "TP¹ 4009", "TAKE PROFIT 4025"
+TP_RE = (r"(?:(?<![A-Z])TP[\u00b9\u00b2\u00b3\u2070-\u2079]?[\s\-_.]*\d?[\s:@\-.]*"
+         r"|TAKE\s*PROFIT\s*[:@\-]?\s*)(\d{4,5}(?:\.\d+)?)")
+
 def parse_signal(text):
     """
     Parsea texto de Damaris y retorna dict con symbol, side, entry, sl, tp o None
@@ -148,14 +184,20 @@ def parse_signal(text):
         nums = re.findall(r"\d{4,5}(?:\.\d+)?", text)
         slash_match = re.search(r"(\d{4,5})/(\d{4,5})", text)
         sl_match = re.search(r"(?<![A-Z])(?:SL|STOP\s*LOSS)\s*[:@\-]?\s*(\d{4,5}(?:\.\d+)?)", upper)
-        tp_matches = re.findall(r"(?:(?<![A-Z])TP\d?|TAKE\s*PROFIT)\s*[:@\-]?\s*(\d{4,5}(?:\.\d+)?)", upper)
+        tp_matches = re.findall(TP_RE, upper)
 
         entry = None
         sl = float(sl_match.group(1)) if sl_match else None
         tps = [float(x) for x in tp_matches] if tp_matches else []
 
+        # Zona de entrada tipo "Entry Zone 4018-4024" o "4002_4012" (solo en el encabezado, antes del primer SL/TP)
+        _first_lvl = re.search(r"(?<![A-Z])(?:SL|STOP\s*LOSS|TP|TAKE\s*PROFIT)", upper)
+        _header = upper[:_first_lvl.start()] if _first_lvl else upper
+        rng_match = re.search(r"(\d{4,5}(?:\.\d+)?)\s*[-_\u2013]\s*(\d{4,5}(?:\.\d+)?)", _header)
         if slash_match:
             entry = (float(slash_match.group(1)) + float(slash_match.group(2))) / 2
+        elif rng_match:
+            entry = (float(rng_match.group(1)) + float(rng_match.group(2))) / 2
         else:
             m = re.search(r"(?:BUY|SELL)\s*(\d{4,5}(?:\.\d+)?)", upper)
             if m:
@@ -364,10 +406,17 @@ async def main():
     if not listen_map:
         listen_map[listen_id if isinstance(listen_id,int) else -1001093875226] = "DAMARIS"
 
+    # 4) Fuentes extra fijas (XCLUB, SNIPER): no hace falta tocar LISTEN_CHATS en Railway
+    for _lbl, _cid in EXTRA_SOURCES.items():
+        try:
+            if _cid: listen_map[int(_cid)] = _lbl
+        except Exception:
+            pass
+
     print(f"🔐 Conectando Telethon como espejo...")
     print(f"   API_ID: {TG_API_ID}")
     print(f"   LISTEN_CHATS: {listen_map} (tu espejo {DEST_CHAT})")
-    print(f"   STAKE_DAMARIS=${STAKE_DAMARIS} STAKE_UK=${STAKE_UK} DRY_RUN={DRY_RUN}")
+    print(f"   STAKE_DAMARIS=${STAKE_DAMARIS} STAKE_UK=${STAKE_UK} STAKE_XCLUB=${STAKE_XCLUB} STAKE_SNIPER=${STAKE_SNIPER} DRY_RUN={DRY_RUN}")
 
     # FIX: limpia saltos de linea y espacios que Railway mete al copiar
     clean_session = TG_SESSION.strip().replace("\n","").replace("\r","").replace(" ","")
@@ -455,7 +504,8 @@ async def main():
             src_label = "DAMARIS"
 
         # Stake segun origen
-        stake_use = STAKE_DAMARIS if src_label == "DAMARIS" else STAKE_UK if src_label == "UK" else STAKE_USD
+        stake_use = (STAKE_DAMARIS if src_label == "DAMARIS" else STAKE_UK if src_label == "UK"
+                     else STAKE_XCLUB if src_label == "XCLUB" else STAKE_SNIPER if src_label == "SNIPER" else STAKE_USD)
 
         print(f"\n📩 Nuevo mensaje en [{src_label}] {chat_id}: {text[:200]}... | stake ${stake_use}")
 
@@ -470,7 +520,19 @@ async def main():
         is_valid_signal = temp_signal and temp_signal.get("action") == "OPEN"
         is_close_signal = temp_signal and temp_signal.get("action") == "CLOSE"
 
-        if is_close_signal:
+        is_extra = src_label in EXTRA_LABELS
+        if is_extra:
+            # XCLUB / SNIPER: la señal real es "BUY/SELL + SL + TP" explicitos. XCLUB firma sus señales con su propio @ (permitido);
+            # cualquier otro @usuario, link o texto de VIP/join/descuento = anuncio.
+            if extra_is_ad(src_label, text):
+                is_ad = True
+                print(f"🚫 [{src_label}] ANUNCIO (@ajeno/link/VIP) -> no opero ni copio: {text[:80]}...")
+            elif not is_valid_signal:
+                print(f"⏭️ [{src_label}] mensaje sin señal operable (resultado/charla), ignoro: {text[:60]}...")
+                return
+            else:
+                is_ad = False
+        elif is_close_signal:
             is_ad = False  # TP Done Hit Successfully SIEMPRE se copia
             print(f"✅ Señal CIERRE detectada, no es anuncio: {text[:80]}...")
         elif has_at_damaris:
@@ -661,7 +723,7 @@ async def main():
                 open(mapping_file, 'w').write(json.dumps(data, indent=2))
             except: pass
             # Si es UK, agrega a trailing BE
-            if src_label == "UK" and cid:
+            if src_label in BE_SOURCES and cid:
                 try:
                     uk_trailing[cid] = {
                         "entry": signal['entry'],
@@ -672,13 +734,14 @@ async def main():
                         "be_done": False,
                         "tp1_locked": False,
                         "tp3_locked": False,
+                        **be_params(src_label),
                     }
-                    print(f"📈 [UK BE] Registrado {cid} para trailing: Entry {signal['entry']} TPs {signal.get('tps',[])}")
+                    print(f"📈 [UK BE] Registrado [{src_label}] {cid} para trailing: Entry {signal['entry']} TPs {signal.get('tps',[])}")
                 except: pass
             try:
                 # Envia confirmacion SOLO a tu Espejo, NO al canal origen (evita ban)
                 if dest_entity:
-                    be_info = " + BE UK (TP1->BE, TP3->TP1, TP5->TP3)" if src_label == "UK" else ""
+                    be_info = f" + BE {src_label} (TP1->BE, TP3->TP1, TP5->TP3)" if src_label in BE_SOURCES else ""
                     await client.send_message(dest_entity, f"✅ [{src_label}] Ejecutada en Deriv DEMO x100: {base} {side} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} (TPs {signal.get('tps',[])}) Stake ${stake_use} | CID {cid}{be_info}\nFuente: {src_label} Trades")
             except: pass
         else:
@@ -694,7 +757,7 @@ async def main():
                     try:
                         if dest_entity:
                             await client.send_message(dest_entity, f"✅ [{src_label}] Reintento OK en Deriv: {base} {side} Stake ${retry_stake} | CID {cid2}")
-                        if src_label == "UK" and cid2:
+                        if src_label in BE_SOURCES and cid2:
                             uk_trailing[cid2] = {
                                 "entry": signal['entry'],
                                 "sl": signal['sl'],
@@ -704,6 +767,7 @@ async def main():
                                 "be_done": False,
                                 "tp1_locked": False,
                                 "tp3_locked": False,
+                                **be_params(src_label),
                             }
                     except: pass
                 else:
@@ -834,13 +898,16 @@ async def main():
                     for i, tp_price in enumerate(tps_sorted):
                         if (side == "BUY" and spot >= tp_price) or (side == "SELL" and spot <= tp_price):
                             hit = i + 1
-                    stage = 5 if hit >= 5 else 3 if hit >= 3 else 1 if hit >= 1 else 0
+                    shift = int(info.get('shift', 0))
+                    buf = float(info.get('buffer', 0.0))
+                    stage = 5 if hit >= 5 + shift else 3 if hit >= 3 + shift else 1 if hit >= 1 + shift else 0
                     if stage > int(info.get('stage', 0)):
-                        lock = entry_spot if stage == 1 else (tps_sorted[0] if stage == 3 else tps_sorted[min(2, len(tps_sorted) - 1)])
+                        be_level = (entry_spot - buf) if side == "BUY" else (entry_spot + buf)
+                        lock = be_level if stage == 1 else (tps_sorted[0] if stage == 3 else tps_sorted[min(2, len(tps_sorted) - 1)])
                         info['stage'] = stage; info['lock'] = lock; info['current_sl_price'] = lock
                         info['be_done'] = True
                         lbl = {1: "BE (entrada real)", 3: "TP1", 5: "TP3"}[stage]
-                        print(f"🔒 [UK BE] {cid} TP{stage} alcanzado (spot {spot}) -> proteccion a {lbl} {lock}")
+                        print(f"🔒 [UK BE] [{info.get('src','UK')}] {cid} TP{hit} alcanzado (spot {spot}) -> proteccion a {lbl} {lock}")
                         extra = ""
                         if stage == 1 and stake > 0:
                             loss_amt = round(max(0.5, stake * BE_BACKUP_LOSS_PCT), 2)
@@ -852,7 +919,7 @@ async def main():
                                 print(f"📈 [UK BE] {cid} SL nativo de respaldo -> perdida max ${loss_amt}")
                                 extra = f" + SL nativo respaldo -${loss_amt}"
                         _save_trailing()
-                        await _notify(f"🔒 [UK BE] {cid} TP{stage} hit (spot {spot}). Proteccion en {lbl} {lock}{extra}")
+                        await _notify(f"🔒 [BE {info.get('src','UK')}] {cid} TP{hit} hit (spot {spot}). Proteccion en {lbl} {lock}{extra}")
 
                     lock = info.get('lock')
                     if lock is not None:
