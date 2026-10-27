@@ -503,6 +503,15 @@ async def main():
         except:
             src_label = "DAMARIS"
 
+        # GRUPO DE PRUEBAS: un mensaje que empieza con #UK, #XCLUB, #SNIPER o #DAMARIS se trata como esa fuente
+        # (mismo parser, filtro de anuncios, stake y BE). Solo funciona en chats UNKNOWN (tu grupo de pruebas).
+        if src_label == "UNKNOWN":
+            _mt = re.match(r"\s*#(UK|XCLUB|SNIPER|DAMARIS)\b[:\s]*", text, re.IGNORECASE)
+            if _mt:
+                src_label = _mt.group(1).upper()
+                text = text[_mt.end():]
+                print(f"🧪 [PRUEBA] mensaje del grupo de pruebas tratado como [{src_label}]")
+
         # Stake segun origen
         stake_use = (STAKE_DAMARIS if src_label == "DAMARIS" else STAKE_UK if src_label == "UK"
                      else STAKE_XCLUB if src_label == "XCLUB" else STAKE_SNIPER if src_label == "SNIPER" else STAKE_USD)
