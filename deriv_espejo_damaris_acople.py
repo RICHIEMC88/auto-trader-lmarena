@@ -78,6 +78,9 @@ STAKE_USD = float(e("STAKE_USD","20") or 20)
 STAKE_DAMARIS = float(e("STAKE_DAMARIS", str(STAKE_USD)) or STAKE_USD)  # $10 para Damaris
 STAKE_UK = float(e("STAKE_UK","12") or 12)  # $12 para UK - asi los diferencias en Deriv
 DRY_RUN = (e("DRY_RUN","0") or "0").lower() in ("1","true","yes")
+# Espera antes de conectar a Telegram en cada deploy NUEVO: Railway deja corriendo el deploy viejo ~2 min y si los dos usan
+# la misma sesion Telegram la anula (AuthKeyDuplicatedError). 0 = sin espera.
+START_DELAY_SEC = int(e("START_DELAY_SEC", "150") or 0)
 
 # Fuentes extra (2026-10-26): XAUUSD TRADING CLUB y Sniper Zone (ICT+CRT). Stake distinto para identificarlas en Deriv.
 STAKE_XCLUB = float(e("STAKE_XCLUB", "15") or 15)
@@ -432,7 +435,22 @@ async def main():
 
     client = TelegramClient(session_obj, TG_API_ID, TG_API_HASH)
 
-    await client.start()
+    # Solo en el primer arranque del contenedor (los reinicios internos no esperan)
+    _marker = "/tmp/.acople_started"
+    if START_DELAY_SEC > 0 and not os.path.exists(_marker):
+        print(f"⏳ Espero {START_DELAY_SEC}s antes de conectar a Telegram (evita choque de sesion con el deploy anterior)...")
+        await asyncio.sleep(START_DELAY_SEC)
+    try: open(_marker, "w").write("1")
+    except Exception: pass
+
+    try:
+        await client.start()
+    except Exception as _ex:
+        if "AuthKeyDuplicated" in type(_ex).__name__ or "AuthKeyDuplicated" in str(_ex):
+            print("❌ SESION TELEGRAM ANULADA (AuthKeyDuplicatedError): se uso desde 2 IPs a la vez.")
+            print("   SOLUCION: correr login_once.py, poner el texto nuevo en TG_SESSION (Railway) y redeploy.")
+            await asyncio.sleep(600)
+        raise
     print("✅ Telethon conectado")
 
     # Resuelve todas las entidades a escuchar (Damaris + UK)
