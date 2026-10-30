@@ -1,52 +1,58 @@
 #!/usr/bin/env python3
 """
-Starter que corre AMBOS bots en paralelo en Railway:
-- Bot v25 Forex 4 pares + Vol75 (senal_diaria.py)
-- Acople Damaris -> Deriv (deriv_espejo_damaris_acople.py)
+Starter para Railway.
 
-Para Railway: Settings -> Start Command = python start_both_bots.py
+ESTADO ACTUAL (30/10/2026): FOREX APAGADO.
+Solo corre el Acople Damaris/XCLUB/SNIPER/UK -> Deriv.
+
+El bot de forex v25 (senal_diaria.py) queda DESACTIVADO porque con stake $20 y
+multiplicador x100 un solo SL cuesta -$18 (el 90% del stake), y en 40 horas de
+operacion se comio -18.03 de los +38.57 que ganaron los canales de Telegram.
+
+Para volver a encenderlo: poner FOREX_ON=1 en las variables de Railway
+(o cambiar la variable de abajo FOREX_ON = "1").
+Vol75 (R_75) vive DENTRO de senal_diaria.py, asi que tambien queda apagado.
 """
 import subprocess, sys, time, os
 
+FOREX_ON = os.environ.get("FOREX_ON", "0")   # "1" = encender forex v25
+FOREX_SCRIPT = "senal_diaria.py"
+ACOPLE_SCRIPT = "deriv_espejo_damaris_acople.py"
+
 def run_bot(name, script):
-    print(f"🚀 Iniciando {name}: {script}")
-    # Usa Popen para correr en paralelo
-    env = dict(os.environ)
-    return subprocess.Popen([sys.executable, script], env=env)
+    print(f"🚀 Iniciando {name}: {script}", flush=True)
+    return subprocess.Popen([sys.executable, script], env=dict(os.environ))
 
 if __name__ == "__main__":
-    bots = []
-    # Bot 1: Forex 4 pares + Vol75 v25
-    if os.path.exists("senal_diaria.py"):
-        bots.append(run_bot("Forex4+Vol75 v25", "senal_diaria.py"))
+    bots = []   # lista de (nombre, script, proceso)
+
+    # ---------- Bot 1: Forex v25 + Vol75 (APAGADO por defecto) ----------
+    if FOREX_ON == "1":
+        if os.path.exists(FOREX_SCRIPT):
+            bots.append(("Forex4+Vol75 v25", FOREX_SCRIPT, run_bot("Forex4+Vol75 v25", FOREX_SCRIPT)))
+        else:
+            print(f"⚠️ {FOREX_SCRIPT} no encontrado", flush=True)
+        time.sleep(5)
     else:
-        print("⚠️ senal_diaria.py no encontrado")
+        print("⏸️ FOREX v25 APAGADO (FOREX_ON=0). No se opera forex ni Vol75.", flush=True)
 
-    # Espera 5 seg entre bots
-    time.sleep(5)
-
-    # Bot 2: Espejo Damaris -> Deriv
-    if os.path.exists("deriv_espejo_damaris_acople.py"):
-        bots.append(run_bot("Damaris->Deriv", "deriv_espejo_damaris_acople.py"))
+    # ---------- Bot 2: Acople Telegram -> Deriv (SIEMPRE) ----------
+    if os.path.exists(ACOPLE_SCRIPT):
+        bots.append(("Telegram->Deriv", ACOPLE_SCRIPT, run_bot("Telegram->Deriv", ACOPLE_SCRIPT)))
     else:
-        print("⚠️ deriv_espejo_damaris_acople.py no encontrado")
+        print(f"⚠️ {ACOPLE_SCRIPT} no encontrado", flush=True)
 
-    print(f"✅ {len(bots)} bots iniciados, esperando...")
+    print(f"✅ {len(bots)} bot(s) iniciados: " + ", ".join(b[0] for b in bots), flush=True)
 
-    # Mantiene vivo mientras ambos corran
     try:
         while True:
-            for i, p in enumerate(bots):
+            for i, (name, script, p) in enumerate(bots):
                 if p.poll() is not None:
-                    print(f"⚠️ Bot {i} murio con codigo {p.returncode}, reiniciando en 10s...")
+                    print(f"⚠️ {name} murio con codigo {p.returncode}, reiniciando en 10s...", flush=True)
                     time.sleep(10)
-                    # Reinicia segun indice
-                    if i == 0 and os.path.exists("senal_diaria.py"):
-                        bots[i] = run_bot("Forex4+Vol75 v25", "senal_diaria.py")
-                    elif i == 1 and os.path.exists("deriv_espejo_damaris_acople.py"):
-                        bots[i] = run_bot("Damaris->Deriv", "deriv_espejo_damaris_acople.py")
+                    bots[i] = (name, script, run_bot(name, script))
             time.sleep(30)
     except KeyboardInterrupt:
-        print("🛑 Deteniendo bots...")
-        for p in bots:
+        print("🛑 Deteniendo bots...", flush=True)
+        for _, _, p in bots:
             p.terminate()
