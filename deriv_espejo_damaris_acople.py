@@ -95,6 +95,10 @@ BE_SOURCES = ("UK", "XCLUB", "SNIPER")   # fuentes con BE trailing
 # y se deja 1 punto de aire para que el spread/ruido no lo saque en 0.
 BE_SHIFT_EXTRA = int(e("BE_SHIFT_EXTRA", "1") or 1)
 BE_BUFFER_EXTRA = float(e("BE_BUFFER_EXTRA", "1.0") or 1.0)
+# PARCHE 10 (30/10): guarda el motivo cuando el parser descarta una senal
+# aparentemente valida (p.ej. SL del lado equivocado), para avisar en el espejo.
+LAST_REJECT = {"msg": None}
+
 def be_params(label):
     if label in EXTRA_LABELS:
         return {"shift": BE_SHIFT_EXTRA, "buffer": BE_BUFFER_EXTRA, "src": label}
@@ -162,6 +166,7 @@ def parse_signal(text):
     v2: soporta GOLD con multiples TPs y formato 4167/4164
     """
     if not text: return None
+    LAST_REJECT["msg"] = None
     upper = text.upper().strip()
 
     # Detecta CIERRE: Damaris manda "TP Done Hit Successfully" o "Ready for signal"
@@ -225,6 +230,7 @@ def parse_signal(text):
             sl_ok = (sl < entry) if side == "BUY" else (sl > entry)
             if not sl_ok or not tps_ok:
                 print(f"⚠️ Señal GOLD descartada por incoherente: {side} entry {entry} SL {sl} TPs {tps}")
+                LAST_REJECT["msg"] = f"señal incoherente: {side} entry {entry} con SL {sl} y TPs {tps} (SL del lado equivocado)"
                 return None
             tps = tps_ok
         if entry and sl and tps:
@@ -634,6 +640,18 @@ async def main():
 
         # 2) INTENTO PARSE DIRECTO (todo en 1 mensaje)
         signal = parse_signal(text)
+        # PARCHE 10: si era senal pero se descarto por incoherente, dejar rastro
+        # permanente en el espejo (antes solo salia en el log, que se borra).
+        if not signal and LAST_REJECT["msg"]:
+            _rej = LAST_REJECT["msg"]
+            LAST_REJECT["msg"] = None
+            print(f"⏭️ [{src_label}] RECHAZADA -> {_rej}")
+            try:
+                if dest_entity:
+                    await client.send_message(dest_entity,
+                        f"⏭️ [{src_label}] NO se abrió: {_rej}\nFuente: {src_label} Trades")
+            except Exception:
+                pass
 
         # 3) SI NO ES SEÑAL COMPLETA, INTENTA JUNTAR MENSAJES PARTIDOS (Damaris manda 3 msgs)
         if not signal:
@@ -768,11 +786,40 @@ async def main():
             try:
                 # Envia confirmacion SOLO a tu Espejo, NO al canal origen (evita ban)
                 if dest_entity:
-                    be_info = f" + BE {src_label} (TP1->BE, TP3->TP1, TP5->TP3)" if src_label in BE_SOURCES else ""
+                    if src_label in BE_SOURCES:
+                        if src_label in EXTRA_LABELS:
+                            be_info = f" + BE {src_label} (TP2->BE-1pt, TP4->TP1, TP6->TP3)"
+                        else:
+                            be_info = f" + BE {src_label} (TP1->BE, TP3->TP1, TP5->TP3)"
+                    else:
+                        be_info = ""
                     await client.send_message(dest_entity, f"✅ [{src_label}] Ejecutada en Deriv DEMO x100: {base} {side} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} (TPs {signal.get('tps',[])}) Stake ${stake_use} | CID {cid}{be_info}\nFuente: {src_label} Trades")
             except: pass
         else:
             print(f"❌ Fallo orden [{src_label}] {base} {side}: {out[-500:]}")
+            # PARCHE 10: publica el motivo del rechazo en el espejo (SE ALEJO,
+            # SEÑAL VENCIDA, payout=0, etc.). Antes solo vivia en el log.
+            _motivo = ""
+            try:
+                for _ln in out.splitlines():
+                    if _ln.startswith("RECHAZO|"):
+                        _motivo = _ln.split("|", 1)[1].strip()
+                        break
+                if not _motivo:
+                    for _ln in out.splitlines():
+                        if "❌" in _ln:
+                            _motivo = _ln.strip().lstrip("❌ ").strip()
+                if not _motivo:
+                    _motivo = (out.strip().splitlines() or ["error desconocido"])[-1][:200]
+            except Exception:
+                _motivo = "error desconocido"
+            _motivo = _motivo[:300]
+            try:
+                if dest_entity:
+                    await client.send_message(dest_entity,
+                        f"⏭️ [{src_label}] NO se abrió {base} {side} (entrada {signal['entry']}) -> {_motivo}\nFuente: {src_label} Trades")
+            except Exception:
+                pass
             # Si falla por payout=0, intenta con stake mayor automaticamente
             if "payout=0" in out or "InvalidContractProposal" in out:
                 print(f"⚠️ Reintentando [{src_label}] con stake mayor...")
@@ -806,10 +853,7 @@ async def main():
     UK_POLL_SEC = float(e("UK_BE_POLL_SEC", "5") or 5)
     BE_BACKUP_LOSS_PCT = float(e("BE_BACKUP_LOSS_PCT", "0.04") or 0.04)  # SL nativo de respaldo al llegar a TP1 (4% del stake)
     # Operacion UK ya abierta antes de este parche (se retira sola cuando Deriv la reporte cerrada)
-    UK_SEED = {
-        "18429612179": {"entry": 4004.0, "sl": 3994.0, "tps": [4014.0, 4024.0, 4034.0, 4044.0, 4054.0, 4064.0],
-                        "side": "BUY", "current_sl_price": 3994.0},
-    }
+    UK_SEED = {}  # (el contrato 18429612179 ya cerro; sin semilla)
     try:
         if os.path.exists(UK_TRAIL_FILE):
             uk_trailing.update(json.loads(open(UK_TRAIL_FILE).read() or "{}"))
@@ -876,7 +920,7 @@ async def main():
         """Mueve la proteccion en Deriv: TP1->BE, TP3->TP1, TP5->TP3.
         BE: SL nativo de respaldo (contract_update) + stop virtual (vende a mercado si el precio regresa al nivel).
         TP3/TP5: Deriv no permite SL en ganancia -> stop virtual con venta a mercado."""
-        print("📈 Monitor BE UK iniciado (TP1->BE, TP3->TP1, TP5->TP3) - modo REAL Deriv (precio spot de Deriv)")
+        print("📈 Monitor BE iniciado - DAMARIS/UK: TP1->BE, TP3->TP1, TP5->TP3 | XCLUB/SNIPER: TP2->BE-1pt, TP4->TP1, TP6->TP3 - modo REAL Deriv")
         ws = None
         fails = {}
         while True:
@@ -959,13 +1003,13 @@ async def main():
                             else:
                                 sold = rs.get("sell") or {}
                                 print(f"✅ [UK BE] {cid} vendido: sell_price={sold.get('sold_for') or sold.get('sell_price')}")
-                                await _notify(f"✅ [UK BE] {cid} cerrado por proteccion {lock} (spot {spot}). Vendido: {sold.get('sold_for') or sold.get('sell_price')}")
+                                await _notify(f"✅ [BE {info.get('src','UK')}] {cid} cerrado por proteccion {lock} (spot {spot}). Vendido: {sold.get('sold_for') or sold.get('sell_price')}")
                                 uk_trailing.pop(cid, None); _save_trailing()
                 _save_trailing()
             except asyncio.CancelledError:
                 raise
             except Exception as ex:
-                print(f"⚠️ Monitor UK error: {ex}")
+                print(f"⚠️ Monitor UK error: {type(ex).__name__}: {ex!r}")
                 try:
                     if ws is not None: await ws.close()
                 except Exception: pass
