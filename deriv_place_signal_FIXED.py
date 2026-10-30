@@ -53,6 +53,10 @@ MIN_USD = 0.35
 
 def fail(msg):
     print(f"❌ {msg}")
+    # PARCHE 10 (30/10): marca legible por el acople para publicar el motivo
+    # del rechazo en el canal espejo (antes solo quedaba en el log de Railway,
+    # que se borra y no dejaba rastro auditable).
+    print(f"RECHAZO|{msg}")
     raise SystemExit(1)
 
 def calc_usd():
