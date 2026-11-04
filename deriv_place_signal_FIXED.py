@@ -127,6 +127,14 @@ FOLLOW = bool((e("SIGNAL_SOURCE", "") or "").strip())
 # Si el precio real de Deriv se alejo mas de este % de la entrada de la señal, NO abre (entraria tarde).
 # 0.15% = ~$6 en oro. Cada broker tiene su propio precio, diferencias de $2-3 en oro son normales y pasan.
 MAX_SLIP_PCT = float(e("MAX_SLIP_PCT", "0.0015") or 0.0015)
+# PARCHE 12 (04/11): el deslizamiento ahora es DIRECCIONAL.
+#   - Si el precio se movio EN CONTRA de la senal (BUY: subio / SELL: bajo), estas
+#     entrando tarde -> se aplica MAX_SLIP_PCT (0.15%).
+#   - Si se movio A FAVOR (BUY: bajo / SELL: subio), es MEJOR entrada, no peor.
+#     Antes se rechazaba igual porque se usaba valor absoluto, y con eso se perdian
+#     casi todas las señales de Damaris (TPs cada 3 puntos vs 7.75 de tolerancia).
+#     Ahora se permite, con un tope de seguridad MAX_SLIP_FAVOR_PCT (0.30%).
+MAX_SLIP_FAVOR_PCT = float(e("MAX_SLIP_FAVOR_PCT", "0.0030") or 0.0030)
 # Despues de comprar, corrige SL/TP con el precio de entrada REAL del contrato (1 = si, 0 = no)
 POST_FILL_FIX = (e("POST_FILL_FIX", "1") or "1") != "0"
 
@@ -309,11 +317,23 @@ async def place_order():
             except Exception:
                 fail(f"No pude leer el spot: {json.dumps(rb)[:300]}")
             if ENTRY > 0 and MAX_SLIP_PCT > 0:
-                slip = abs(live_spot - ENTRY) / ENTRY
-                if slip > MAX_SLIP_PCT:
-                    fail(f"SE ALEJÓ: precio Deriv {live_spot} vs entrada señal {ENTRY} "
-                         f"({abs(live_spot-ENTRY):.2f} pts = {slip*100:.3f}% > {MAX_SLIP_PCT*100:.3f}%). No abro para no entrar tarde.")
-                print(f"   slippage {abs(live_spot-ENTRY):.2f} pts ({slip*100:.3f}%) dentro del limite {MAX_SLIP_PCT*100:.3f}%")
+                # PARCHE 12: deslizamiento DIRECCIONAL (ver comentario en MAX_SLIP_FAVOR_PCT)
+                dif = live_spot - ENTRY
+                slip = abs(dif) / ENTRY
+                # "en contra" = el precio se alejo en la direccion de la senal
+                en_contra = (dif > 0) if SIDE == "BUY" else (dif < 0)
+                if en_contra:
+                    if slip > MAX_SLIP_PCT:
+                        fail(f"SE ALEJÓ: precio Deriv {live_spot} vs entrada señal {ENTRY} "
+                             f"({abs(dif):.2f} pts = {slip*100:.3f}% > {MAX_SLIP_PCT*100:.3f}%). "
+                             f"El precio se movió en contra (entraría tarde). No abro.")
+                    print(f"   slippage en contra {abs(dif):.2f} pts ({slip*100:.3f}%) dentro del limite {MAX_SLIP_PCT*100:.3f}%")
+                else:
+                    if slip > MAX_SLIP_FAVOR_PCT:
+                        fail(f"SE ALEJÓ: precio Deriv {live_spot} vs entrada señal {ENTRY} "
+                             f"({abs(dif):.2f} pts = {slip*100:.3f}% a favor, más de {MAX_SLIP_FAVOR_PCT*100:.3f}%). "
+                             f"El precio ya recorrió demasiado el movimiento. No abro.")
+                    print(f"   ⬇️ precio A FAVOR {abs(dif):.2f} pts ({slip*100:.3f}%): mejor entrada que la señal, sigo")
             tlog(f"proposal(spot) recibido, spot={live_spot}")
             sl_usd, tp_usd, adj, mult = calc_usd_follow(live_spot)
             # Compensa la comision de Deriv: el SL cuenta la comision como parte de la perdida (nivel mas cerca)
