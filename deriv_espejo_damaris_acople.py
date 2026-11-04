@@ -449,14 +449,49 @@ async def main():
     try: open(_marker, "w").write("1")
     except Exception: pass
 
+    # PARCHE 11 (03/11): NUNCA usar client.start(), porque si la sesion dejo de ser
+    # valida Telethon pide el telefono por consola, en el servidor no hay teclado y
+    # el proceso muere con "EOFError: EOF when reading a line" (paso el 2 nov y el
+    # bot estuvo caido un dia sin avisar). Ahora se conecta, se revisa si la sesion
+    # sigue autorizada y, si no, se dice CLARO que hay que rehacer el login.
     try:
-        await client.start()
+        await client.connect()
     except Exception as _ex:
-        if "AuthKeyDuplicated" in type(_ex).__name__ or "AuthKeyDuplicated" in str(_ex):
-            print("❌ SESION TELEGRAM ANULADA (AuthKeyDuplicatedError): se uso desde 2 IPs a la vez.")
-            print("   SOLUCION: correr login_once.py, poner el texto nuevo en TG_SESSION (Railway) y redeploy.")
-            await asyncio.sleep(600)
+        print(f"❌ No pude conectar a Telegram: {type(_ex).__name__}: {_ex}")
         raise
+
+    try:
+        autorizado = await client.is_user_authorized()
+    except Exception as _ex:
+        autorizado = False
+        print(f"⚠️ No pude verificar la sesion: {type(_ex).__name__}: {_ex}")
+
+    if not autorizado:
+        print("=" * 70)
+        print("❌ SESION TELEGRAM ANULADA: TG_SESSION ya no es valida.")
+        print("   (Telegram la invalido, casi siempre porque se uso desde 2 lugares a la vez)")
+        print("")
+        print("   COMO ARREGLARLO (5 minutos):")
+        print("     1. En la PC:  python login_once.py")
+        print("     2. Meter el codigo que llega al telefono (solo en la terminal)")
+        print("     3. Copiar el contenido de session_string.txt")
+        print("     4. Railway -> Variables -> TG_SESSION -> pegar el texto nuevo")
+        print("     5. Redeploy y esperar ~4 minutos")
+        print("   El bot queda esperando (NO se cae) y reintenta cada 10 minutos.")
+        print("=" * 70)
+        # Se queda vivo reintentando: asi Railway NO marca CRASHED y si la sesion
+        # se recupera sola, el bot arranca sin necesidad de otro deploy.
+        for _intento in range(1, 200):
+            await asyncio.sleep(600)
+            try:
+                if await client.is_user_authorized():
+                    print(f"✅ Sesion recuperada en el reintento {_intento}, sigo...")
+                    break
+            except Exception:
+                pass
+        else:
+            raise SystemExit(2)
+
     print("✅ Telethon conectado")
 
     # Resuelve todas las entidades a escuchar (Damaris + UK)
