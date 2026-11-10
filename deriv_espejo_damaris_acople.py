@@ -114,6 +114,25 @@ BIN_ESPEJO_SOLO = (e("BIN_ESPEJO_SOLO", "") or "").strip().upper()  # "" = todos
 TP_NATIVO_N = int(float(e("TP_NATIVO_N", "3") or 3))
 TP_MIN_DIST_PTS = float(e("TP_MIN_DIST_PTS", "8") or 8)
 
+# TP nativo POR CANAL. Desde el 09/11 los canales con TP mas cerca que el SL
+# (Sniper, Damaris, Xclub) usan el TP4; UK donde el TP3 ya esta 3:1 se queda igual.
+# Formato: "SNIPER:4,DAMARIS:4,XCLUB:4,UK:3"   (vacio = todos usan TP_NATIVO_N)
+_POR_CANAL_RAW = (e("TP_NATIVO_POR_CANAL", "SNIPER:4,DAMARIS:4,XCLUB:4,UK:3") or "")
+TP_NATIVO_POR_CANAL = {}
+for _par in _POR_CANAL_RAW.replace(";", ",").split(","):
+    if ":" in _par:
+        _k, _v = _par.split(":", 1)
+        try:
+            TP_NATIVO_POR_CANAL[_k.strip().upper()] = int(float(_v.strip()))
+        except Exception:
+            pass
+
+def tp_n_para(label):
+    """TP nativo que le toca a cada canal (None = comportamiento global)."""
+    if label and label.upper() in TP_NATIVO_POR_CANAL:
+        return TP_NATIVO_POR_CANAL[label.upper()]
+    return TP_NATIVO_N
+
 # C) LATENCIA: cuanto tarda desde que llega el mensaje hasta que la orden queda puesta
 MOSTRAR_LATENCIA = (e("MOSTRAR_LATENCIA", "1") or "1").strip() in ("1", "true", "yes")
 
@@ -122,21 +141,22 @@ MOSTRAR_LATENCIA = (e("MOSTRAR_LATENCIA", "1") or "1").strip() in ("1", "true", 
 LATIDO_MIN = int(float(e("LATIDO_MIN", "60") or 60))
 # ===========================================================================
 
-def elegir_tp(side, entry, tps):
+def elegir_tp(side, entry, tps, label=None):
     """
     PARCHE 15: elige que TP mandar a Deriv como take_profit nativo.
     Devuelve (precio_tp, n_efectivo, distancia).
     """
     if not tps:
         return entry, 0, 0.0
+    TP_NATIVO_N_LOCAL = tp_n_para(label)
     # ordena por cercania a la entrada
     orden = sorted([float(t) for t in tps], key=lambda t: abs(t - entry))
-    if TP_NATIVO_N <= 0:
+    if TP_NATIVO_N_LOCAL <= 0:
         # comportamiento viejo: el mas lejano
         tp = max(tps) if side == "BUY" else min(tps)
         return tp, 0, abs(tp - entry)
     # intenta el TP pedido; si esta demasiado cerca, avanza al siguiente
-    for i in range(max(0, TP_NATIVO_N - 1), len(orden)):
+    for i in range(max(0, TP_NATIVO_N_LOCAL - 1), len(orden)):
         cand = orden[i]
         if abs(cand - entry) >= TP_MIN_DIST_PTS:
             return cand, i + 1, abs(cand - entry)
@@ -213,7 +233,7 @@ def extra_is_ad(label, text):
 TP_RE = (r"(?:(?<![A-Z])TP[\u00b9\u00b2\u00b3\u2070-\u2079]?[\s\-_.]*\d?[\s:@\-.]*"
          r"|TAKE\s*PROFIT\s*[:@\-]?\s*)(\d{4,5}(?:\.\d+)?)")
 
-def parse_signal(text):
+def parse_signal(text, label=None):
     """
     Parsea texto de Damaris y retorna dict con symbol, side, entry, sl, tp o None
     v2: soporta GOLD con multiples TPs y formato 4167/4164
@@ -295,11 +315,12 @@ def parse_signal(text):
             # Usamos el TP más lejano para que Deriv acepte (4135 en vez de 4123)
             # Para BUY, TP lejano = max(tps), para SELL = min(tps)
             # PARCHE 15: TP nativo configurable (por defecto el TP3, no el mas lejano)
-            tp_far, tp_n, tp_dist = elegir_tp(side, entry, tps)
+            tp_far, tp_n, tp_dist = elegir_tp(side, entry, tps, label)
             if tp_n:
-                print(f"🎯 TP nativo: TP{tp_n} a {tp_dist:.1f} pts de la entrada (config TP_NATIVO_N={TP_NATIVO_N})")
+                print(f"🎯 TP nativo [{label or '?'}]: TP{tp_n} a {tp_dist:.1f} pts de la entrada "
+                      f"(config TP_NATIVO_N={tp_n_para(label)})")
             else:
-                print(f"🎯 TP nativo: el mas lejano ({tp_dist:.1f} pts)")
+                print(f"🎯 TP nativo [{label or '?'}]: el mas lejano ({tp_dist:.1f} pts)")
             return {
                 "action": "OPEN",
                 "symbol_raw": "GOLD",
@@ -684,7 +705,7 @@ async def main():
 
         # Primero intenta parsear: si es señal valida con SL y TP numericos, NUNCA es anuncio
         # Tambien si es CIERRE (TP Done), NUNCA es anuncio - es importante
-        temp_signal = parse_signal(text)
+        temp_signal = parse_signal(text, src_label)
         is_valid_signal = temp_signal and temp_signal.get("action") == "OPEN"
         is_close_signal = temp_signal and temp_signal.get("action") == "CLOSE"
 
@@ -774,7 +795,7 @@ async def main():
             return
 
         # 2) INTENTO PARSE DIRECTO (todo en 1 mensaje)
-        signal = parse_signal(text)
+        signal = parse_signal(text, src_label)
         # PARCHE 10: si era senal pero se descarto por incoherente, dejar rastro
         # permanente en el espejo (antes solo salia en el log, que se borra).
         if not signal and LAST_REJECT["msg"]:
