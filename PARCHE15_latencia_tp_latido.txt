@@ -1,0 +1,80 @@
+PARCHE 15 - 09/11/2026  (version final: los tres chicos + TP cercano)
+=======================================================================
+
+ARCHIVO A SUBIR (uno solo):
+  deriv_espejo_damaris_acople.py    (1365 lineas, compila)
+
+Respaldos / anexos:
+  deriv_espejo_damaris_acople_prev14.py   (estado anterior)
+  parche15.diff                           (221 lineas de diff)
+  PARCHE15_latencia_tp_latido.txt         (este archivo)
+
+El espejo se vuelve tu panel de control: latido + latencias + rechazos, todo en
+el mismo canal que ya miras. Cada cosa tiene su switch para apagarla.
+
+===============================================================================
+1) LATIDO  (saber si esta vivo sin abrir Railway)
+===============================================================================
+Cada 60 min manda al espejo:
+
+  💓 Bot vivo 15:00 | abiertas 1 | hoy: 3 abiertas / 2 rechazadas |
+     última señal hace 40 min
+
+Interpretacion: si pasan 2 horas sin latido en horario, el bot esta caido.
+Eso fue lo que no supimos el 1 de noviembre (estuvo muerto un dia entero).
+
+  LATIDO_MIN = 60   -> cada hora (default)
+  LATIDO_MIN = 0    -> apagado
+  LATIDO_HORA_INI = 7 / LATIDO_HORA_FIN = 23  -> solo de 7 a 23, no despierta
+                                                 de madrugada
+
+===============================================================================
+2) LATENCIAS
+===============================================================================
+En cada orden:
+  ✅ [UK] Ejecutada ... | ⏱ señal→orden 2.1 s
+
+En cada rechazo:
+  ⏭️ [UK] NO se abrió frxXAUUSD BUY (entrada 4028) -> ... | ⏱ 3.4 s
+
+  1-3 s  normal  ·  3-6 s  aceptable  ·  >6 s  algo esta lento
+
+  MOSTRAR_LATENCIA = 0 lo apaga.
+
+===============================================================================
+3) RECHAZOS
+===============================================================================
+Ya existian desde el parche 10 (SE ALEJO / SEÑAL VENCIDA / payout=0 ...).
+Lo que se corrigio ahora:
+  - El contador cuenta el rechazo SOLO si el reintento automatico tambien falla
+    (antes salia "abierta" y "rechazada" por la misma señal cuando el reintento
+    con stake x1.5 si entraba).
+  - El mensaje de rechazo ahora lleva la latencia tambien.
+
+===============================================================================
+4) TP NATIVO MAS CERCANO (D)
+===============================================================================
+ANTES: el TP en Deriv era SIEMPRE el mas lejano (TP6/TP7) -> contratos de 4-9 h.
+AHORA: TP3 por defecto (TP_NATIVO_N=3).
+
+  Canal      TP3     Lejano (antes)
+  Damaris    9 pts   15 pts
+  UK        30 pts   60 pts
+  Sniper     9 pts   21 pts
+  XCLUB     18 pts   23 pts
+
+  TP_NATIVO_N = 0   -> vuelve al viejo (el mas lejano)
+  TP_NATIVO_N = 2   -> TP2, cierra aun mas rapido
+  TP_MIN_DIST_PTS=8 -> si el TP elegido queda a menos de 8 pts, toma el siguiente
+
+Contrapartida honesta: cierra mas rapido pero gana menos por operacion.
+
+===============================================================================
+SUBIR
+===============================================================================
+Paso 1: subir deriv_espejo_damaris_acople.py a GitHub
+Paso 2: Railway -> Save (✓) -> Deploy
+Paso 3: esperar el primer "💓 Bot vivo" en el espejo (hasta 60 min) y el
+        primer "⏱ señal→orden X.X s" en la siguiente señal.
+
+No hay que tocar ninguna variable de Railway: los defaults ya son los buenos.
