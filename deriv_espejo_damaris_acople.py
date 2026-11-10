@@ -139,6 +139,17 @@ MOSTRAR_LATENCIA = (e("MOSTRAR_LATENCIA", "1") or "1").strip() in ("1", "true", 
 # LATIDO: mensaje periodico al espejo para saber que el bot sigue vivo
 #   0 = apagado | n = cada n minutos (por defecto 60)
 LATIDO_MIN = int(float(e("LATIDO_MIN", "60") or 60))
+
+# ============================ PARCHE 16 (09/11) ============================
+# MEDIDOR DE RECORRIDO. Los canales publican "BUY GOLD +600 PIPS" pero en sus
+# señales el TP7 queda a 21 puntos (=210 "pips" de ellos: 10 pips = 1 punto).
+# Este medidor NO opera nada: solo mira el precio y reporta cuanto avanzo de
+# verdad a favor y en contra desde la entrada, y si alguna vez llego al
+# objetivo que ellos presumen (600 pips = 60 puntos).
+MEDIR_RECORRIDO = (e("MEDIR_RECORRIDO", "1") or "1").strip() in ("1", "true", "yes")
+RECORRIDO_HORAS = float(e("RECORRIDO_HORAS", "4") or 4)        # cuanto tiempo se vigila
+RECORRIDO_POLL_SEC = float(e("RECORRIDO_POLL_SEC", "60") or 60)
+RECORRIDO_OBJETIVO_PTS = float(e("RECORRIDO_OBJETIVO_PTS", "60") or 60)  # 600 "pips" de UK
 # ===========================================================================
 
 def elegir_tp(side, entry, tps, label=None):
@@ -913,6 +924,8 @@ async def main():
             last_signals[key] = now
             print(f"✅ Orden ejecutada [{src_label}] {base} {side} cid={cid} TPs={signal.get('tps',[])} stake=${stake_use}")
             _bump("abiertas")
+            if base == "XAUUSD":
+                _registrar_recorrido(src_label, side, signal['entry'])
             # ===== PARCHE 13: binaria paralela (experimento, no reemplaza nada) =====
             if BINARIA_ESPEJO and (not BIN_ESPEJO_SOLO or src_label in [x.strip() for x in BIN_ESPEJO_SOLO.split(",")]):
                 def _abrir_bin(_sig=dict(signal), _lbl=src_label):
@@ -1054,6 +1067,33 @@ async def main():
     ULTIMA_SENAL = {"t": 0.0}
     SENALES_HOY = {"abiertas": 0, "rechazadas": 0, "dia": time.strftime("%Y-%m-%d")}
 
+    # PARCHE 16: señales en vigilancia para medir el recorrido real del precio
+    RECORRIDO = []
+    RECORRIDO_FILE = "recorrido.json"
+    try:
+        if os.path.exists(RECORRIDO_FILE):
+            RECORRIDO.extend(json.loads(open(RECORRIDO_FILE).read() or "[]"))
+    except Exception as _ex:
+        print(f"⚠️ [RECORRIDO] no pude leer {RECORRIDO_FILE}: {_ex}")
+
+    def _save_recorrido():
+        try: open(RECORRIDO_FILE, "w").write(json.dumps(RECORRIDO[-200:], indent=2))
+        except Exception: pass
+
+    def _registrar_recorrido(label, side, entry):
+        """PARCHE 16: empieza a vigilar el precio de esta señal (no opera nada)."""
+        if not MEDIR_RECORRIDO:
+            return
+        try:
+            RECORRIDO.append({
+                "src": label, "side": side, "entry": float(entry),
+                "t0": time.time(), "max_favor": 0.0, "max_contra": 0.0, "cerrado": False,
+            })
+            _save_recorrido()
+            print(f"📏 [RECORRIDO] vigilando [{label}] {side} {entry} por {RECORRIDO_HORAS:g} h")
+        except Exception as _ex:
+            print(f"⚠️ [RECORRIDO] {_ex}")
+
     def _bump(tipo):
         """PARCHE 15: cuenta aperturas/rechazos del dia para el latido."""
         hoy = time.strftime("%Y-%m-%d")
@@ -1183,6 +1223,60 @@ async def main():
             except Exception as ex:
                 print(f"⚠️ Latido error: {type(ex).__name__}: {ex!r}")
                 await asyncio.sleep(60)
+
+    # PARCHE 16: mide cuanto se movio el precio de verdad desde la entrada.
+    # No toca ordenes: solo consulta el spot y reporta al espejo.
+    async def medir_recorrido():
+        if not MEDIR_RECORRIDO:
+            print("📏 Medidor de recorrido apagado (MEDIR_RECORRIDO=0)")
+            return
+        print(f"📏 Medidor de recorrido activo: objetivo {RECORRIDO_OBJETIVO_PTS:g} pts "
+              f"(= {RECORRIDO_OBJETIVO_PTS*10:g} 'pips' de canal), ventana {RECORRIDO_HORAS:g} h")
+        ws_m = None
+        while True:
+            try:
+                await asyncio.sleep(RECORRIDO_POLL_SEC)
+                vivas = [r for r in RECORRIDO if not r.get("cerrado")]
+                if not vivas:
+                    if ws_m is not None:
+                        try: await ws_m.close()
+                        except Exception: pass
+                        ws_m = None
+                    continue
+                if ws_m is None:
+                    ws_m = await _deriv_connect()
+                r = await _deriv_rpc(ws_m, {"ticks": "frxXAUUSD"})
+                tick = r.get("tick") or {}
+                px = float(tick.get("quote") or 0)
+                if px <= 0:
+                    continue
+                for reg in vivas:
+                    fav = (px - reg["entry"]) if reg["side"] == "BUY" else (reg["entry"] - px)
+                    contra = -fav
+                    reg["max_favor"] = max(reg["max_favor"], round(fav, 2))
+                    reg["max_contra"] = max(reg["max_contra"], round(contra, 2))
+                    reg["ultimo"] = px
+                    horas = (time.time() - reg["t0"]) / 3600
+                    if horas < RECORRIDO_HORAS:
+                        continue
+                    reg["cerrado"] = True
+                    objetivo = "SÍ" if reg["max_favor"] >= RECORRIDO_OBJETIVO_PTS else "NO"
+                    msg = (f"📏 [{reg['src']}] {reg['side']} {reg['entry']:g} · {horas:.1f} h después: "
+                           f"máx a favor {reg['max_favor']:.0f} pts (= {reg['max_favor']*10:.0f} 'pips' del canal) | "
+                           f"máx en contra {reg['max_contra']:.0f} pts | "
+                           f"¿llegó a {RECORRIDO_OBJETIVO_PTS*10:g} pips?: {objetivo}")
+                    print(msg)
+                    await _notify(msg)
+                _save_recorrido()
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                print(f"⚠️ Medidor recorrido error: {type(ex).__name__}: {ex!r}")
+                try:
+                    if ws_m is not None: await ws_m.close()
+                except Exception: pass
+                ws_m = None
+                await asyncio.sleep(30)
 
     async def monitor_binarias():
         """
@@ -1373,6 +1467,7 @@ async def main():
     # Inicia monitor en background
     asyncio.create_task(monitor_uk_be())
     asyncio.create_task(latido())
+    asyncio.create_task(medir_recorrido())
     if BINARIA_ESPEJO:
         asyncio.create_task(monitor_binarias())
         print(f"🧪 EXPERIMENTO BINARIAS ACTIVO - stake aparte ${BIN_ESPEJO_STAKE} (el multiplicador sigue igual)")
