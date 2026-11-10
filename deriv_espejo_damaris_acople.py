@@ -91,6 +91,59 @@ EXTRA_SOURCES = {
 }
 EXTRA_LABELS = tuple(EXTRA_SOURCES.keys())
 BE_SOURCES = ("UK", "XCLUB", "SNIPER")   # fuentes con BE trailing
+
+# ============================ PARCHE 13 (04/11) ============================
+# OPCIONES BINARIAS EN PARALELO - EXPERIMENTO, NO REEMPLAZA NADA.
+# Si BINARIA_ESPEJO=1, ademas del multiplicador de siempre se abre una binaria
+# (Rise/Fall) con stake propio y su resultado se reporta aparte con etiqueta
+# "[BIN]". El multiplicador sigue funcionando EXACTAMENTE igual.
+# Para apagarlo: BINARIA_ESPEJO=0 (por defecto). Nada mas cambia.
+BINARIA_ESPEJO = (e("BINARIA_ESPEJO", "0") or "0").strip() in ("1", "true", "yes")
+BIN_ESPEJO_STAKE = float(e("BIN_ESPEJO_STAKE", "2") or 2)   # stake aparte, chico
+BIN_ESPEJO_SOLO = (e("BIN_ESPEJO_SOLO", "") or "").strip().upper()  # "" = todos, o "UK,XCLUB"
+
+# ============================ PARCHE 15 (09/11) ============================
+# D) TP NATIVO MAS CERCANO
+# Antes el TP que se ponia en Deriv era SIEMPRE el mas lejano de la señal (TP6, TP7),
+# y por eso las operaciones duraban 4-9 horas. Ahora se puede elegir:
+#   TP_NATIVO_N = 3   -> usa el TP3 (por defecto)
+#   TP_NATIVO_N = 0   -> comportamiento viejo (el mas lejano)
+#   TP_NATIVO_N = 2   -> usa el TP2, etc.
+# Si el TP elegido queda a menos de TP_MIN_DIST_PTS de la entrada, se toma el
+# siguiente que cumpla la distancia (Deriv rechaza TP demasiado pegados).
+TP_NATIVO_N = int(float(e("TP_NATIVO_N", "3") or 3))
+TP_MIN_DIST_PTS = float(e("TP_MIN_DIST_PTS", "8") or 8)
+
+# C) LATENCIA: cuanto tarda desde que llega el mensaje hasta que la orden queda puesta
+MOSTRAR_LATENCIA = (e("MOSTRAR_LATENCIA", "1") or "1").strip() in ("1", "true", "yes")
+
+# LATIDO: mensaje periodico al espejo para saber que el bot sigue vivo
+#   0 = apagado | n = cada n minutos (por defecto 60)
+LATIDO_MIN = int(float(e("LATIDO_MIN", "60") or 60))
+# ===========================================================================
+
+def elegir_tp(side, entry, tps):
+    """
+    PARCHE 15: elige que TP mandar a Deriv como take_profit nativo.
+    Devuelve (precio_tp, n_efectivo, distancia).
+    """
+    if not tps:
+        return entry, 0, 0.0
+    # ordena por cercania a la entrada
+    orden = sorted([float(t) for t in tps], key=lambda t: abs(t - entry))
+    if TP_NATIVO_N <= 0:
+        # comportamiento viejo: el mas lejano
+        tp = max(tps) if side == "BUY" else min(tps)
+        return tp, 0, abs(tp - entry)
+    # intenta el TP pedido; si esta demasiado cerca, avanza al siguiente
+    for i in range(max(0, TP_NATIVO_N - 1), len(orden)):
+        cand = orden[i]
+        if abs(cand - entry) >= TP_MIN_DIST_PTS:
+            return cand, i + 1, abs(cand - entry)
+    # ninguno cumple: usa el mas lejano
+    tp = max(tps) if side == "BUY" else min(tps)
+    return tp, len(orden), abs(tp - entry)
+# ==========================================================================
 # BE adaptado a señales con TPs muy pegados (XCLUB/SNIPER): el BE sube 1 TP mas tarde (TP2 en vez de TP1)
 # y se deja 1 punto de aire para que el spread/ruido no lo saque en 0.
 BE_SHIFT_EXTRA = int(e("BE_SHIFT_EXTRA", "1") or 1)
@@ -167,6 +220,10 @@ def parse_signal(text):
     """
     if not text: return None
     LAST_REJECT["msg"] = None
+    # PARCHE 14 (04/11): algunos canales escriben "Gold Sell @ 4136 / Sl: @ 4146 /
+    # TP: @ 4126". El simbolo @ rompia el parseo del SL y la señal se descartaba.
+    # Se normaliza SOLO para el parseo (los @handle se revisan antes, en is_ad).
+    text = text.replace("@", " ")
     upper = text.upper().strip()
 
     # Detecta CIERRE: Damaris manda "TP Done Hit Successfully" o "Ready for signal"
@@ -237,14 +294,12 @@ def parse_signal(text):
             # FIX: Damaris manda TPs muy pegados (4123,4126...). Deriv rechaza TP 3$ con payout=0
             # Usamos el TP más lejano para que Deriv acepte (4135 en vez de 4123)
             # Para BUY, TP lejano = max(tps), para SELL = min(tps)
-            if side == "BUY":
-                tp_far = max(tps)
+            # PARCHE 15: TP nativo configurable (por defecto el TP3, no el mas lejano)
+            tp_far, tp_n, tp_dist = elegir_tp(side, entry, tps)
+            if tp_n:
+                print(f"🎯 TP nativo: TP{tp_n} a {tp_dist:.1f} pts de la entrada (config TP_NATIVO_N={TP_NATIVO_N})")
             else:
-                tp_far = min(tps)
-            # Asegura distancia mínima 10$ para GOLD para que payout no sea 0
-            if abs(tp_far - entry) < 8:
-                # Si aun así es muy chico, usa 15$ de distancia
-                tp_far = entry + 15 if side == "BUY" else entry - 15
+                print(f"🎯 TP nativo: el mas lejano ({tp_dist:.1f} pts)")
             return {
                 "action": "OPEN",
                 "symbol_raw": "GOLD",
@@ -372,6 +427,50 @@ def place_deriv_order(signal, stake_override=None, source_label="DAMARIS"):
         return p.returncode == 0, out, cid
     except Exception as ex:
         return False, f"Error: {ex}", None
+
+def place_binary_order(signal, source_label, dur_min=0):
+    """
+    PARCHE 13: abre una binaria SOLO como experimento paralelo.
+    Reutiliza el mismo archivo deriv_place_binaria.py que ya valida deslizamiento.
+    """
+    env = dict(os.environ)
+    env.update({
+        "DERIV_SIDE": signal["side"],
+        "DERIV_SYMBOL": signal["deriv_sym"],
+        "STAKE_USD": str(BIN_ESPEJO_STAKE),
+        "SIGNAL_ENTRY": str(signal["entry"]),
+        "SIGNAL_SL": str(signal["sl"]),
+        "SIGNAL_TP": str(signal["tp"]),
+        "SIGNAL_TPS": json.dumps(signal.get("tps", [])),
+        "DERIV_API_TOKEN": DERIV_API_TOKEN,
+        "DERIV_APP_ID": DERIV_APP_ID,
+        "SIGNAL_SOURCE": source_label,
+    })
+    if dur_min:
+        env["SIGNAL_DURATION_MIN"] = str(dur_min)
+    if DRY_RUN:
+        env["DERIV_DRY_RUN"] = "1"
+
+    script = "deriv_place_binaria.py"
+    if not os.path.exists(script):
+        print(f"⚠️ [BIN] {script} no existe, no abro binaria")
+        return False, "falta deriv_place_binaria.py", None
+    print(f"🧪 [{source_label}] BINARIA paralela (experimento): {signal['base']} {signal['side']} stake ${BIN_ESPEJO_STAKE}")
+    try:
+        p = subprocess.run([sys.executable, script], capture_output=True, text=True, env=env, timeout=120)
+        out = (p.stdout or "") + (p.stderr or "")
+        print(out[-800:])
+        cid = None
+        for line in out.splitlines():
+            if "contract_id=" in line:
+                try:
+                    cid = line.split("contract_id=")[1].split()[0].strip()
+                except Exception:
+                    pass
+        return p.returncode == 0, out, cid
+    except Exception as ex:
+        return False, f"Error: {ex}", None
+
 
 async def main():
     if not TG_API_ID or not TG_API_HASH or not TG_SESSION:
@@ -541,6 +640,7 @@ async def main():
 
     @client.on(events.NewMessage(chats=entities))
     async def handler(event):
+        _t_recv = time.time()   # PARCHE 15: hora de llegada del mensaje (para latencia)
         text = event.message.message or ""
         if not text:
             return
@@ -734,9 +834,7 @@ async def main():
                 entry = pending_gold["entry"]
                 sl = pending_gold["sl"]
                 tps = pending_gold["tps"]
-                tp_far = max(tps) if side == "BUY" else min(tps)
-                if abs(tp_far - entry) < 8:
-                    tp_far = entry + 15 if side == "BUY" else entry - 15
+                tp_far, _tp_n, _tp_d = elegir_tp(side, entry, tps)
                 signal = {
                     "action": "OPEN",
                     "symbol_raw": "GOLD",
@@ -793,6 +891,42 @@ async def main():
         if ok:
             last_signals[key] = now
             print(f"✅ Orden ejecutada [{src_label}] {base} {side} cid={cid} TPs={signal.get('tps',[])} stake=${stake_use}")
+            _bump("abiertas")
+            # ===== PARCHE 13: binaria paralela (experimento, no reemplaza nada) =====
+            if BINARIA_ESPEJO and (not BIN_ESPEJO_SOLO or src_label in [x.strip() for x in BIN_ESPEJO_SOLO.split(",")]):
+                def _abrir_bin(_sig=dict(signal), _lbl=src_label):
+                    return place_binary_order(_sig, _lbl)
+                async def _bin_task(_sig=dict(signal), _lbl=src_label):
+                    try:
+                        okb, outb, cidb = await asyncio.get_event_loop().run_in_executor(None, _abrir_bin)
+                        if okb and cidb:
+                            bin_trailing[str(cidb)] = {
+                                "entry": _sig["entry"], "sl": _sig["sl"],
+                                "tps": _sig.get("tps", [_sig["tp"]]),
+                                "side": _sig["side"], "stake": BIN_ESPEJO_STAKE,
+                                "src": _lbl, "opened": time.time(),
+                            }
+                            try:
+                                open(BIN_TRAIL_FILE, "w").write(json.dumps(bin_trailing, indent=2))
+                            except Exception:
+                                pass
+                            if dest_entity:
+                                await client.send_message(dest_entity,
+                                    f"🧪 [BIN {_lbl}] Ejecutada (EXPERIMENTO, aparte del multiplicador)\n"
+                                    f"{_sig['base']} {_sig['side']} entrada {_sig['entry']} SL {_sig['sl']} "
+                                    f"TP {_sig['tp']} | Stake ${BIN_ESPEJO_STAKE} | CID {cidb}")
+                            print(f"🧪 [BIN {_lbl}] abierta cid={cidb} stake=${BIN_ESPEJO_STAKE}")
+                        else:
+                            motivo = ""
+                            for _ln in (outb or "").splitlines():
+                                if _ln.startswith("RECHAZO|"):
+                                    motivo = _ln.split("|", 1)[1].strip(); break
+                            if dest_entity:
+                                await client.send_message(dest_entity,
+                                    f"🧪 [BIN {_lbl}] no se abrió: {motivo or 'error'} (el multiplicador sí se ejecutó)")
+                    except Exception as _ex:
+                        print(f"⚠️ [BIN] error abriendo binaria: {_ex}")
+                asyncio.create_task(_bin_task())
             # Guarda mapping para diferenciar en Deriv (no spamea canal origen)
             try:
                 mapping_file = "signal_map.json"
@@ -828,7 +962,13 @@ async def main():
                             be_info = f" + BE {src_label} (TP1->BE, TP3->TP1, TP5->TP3)"
                     else:
                         be_info = ""
-                    await client.send_message(dest_entity, f"✅ [{src_label}] Ejecutada en Deriv DEMO x100: {base} {side} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} (TPs {signal.get('tps',[])}) Stake ${stake_use} | CID {cid}{be_info}\nFuente: {src_label} Trades")
+                    _lat = ""
+                    if MOSTRAR_LATENCIA:
+                        try:
+                            _lat = f" | ⏱ señal→orden {time.time() - _t_recv:.1f} s"
+                        except Exception:
+                            _lat = ""
+                    await client.send_message(dest_entity, f"✅ [{src_label}] Ejecutada en Deriv DEMO x100: {base} {side} Entry {signal['entry']} SL {signal['sl']} TP {signal['tp']} (TPs {signal.get('tps',[])}) Stake ${stake_use} | CID {cid}{be_info}{_lat}\nFuente: {src_label} Trades")
             except: pass
         else:
             print(f"❌ Fallo orden [{src_label}] {base} {side}: {out[-500:]}")
@@ -851,8 +991,9 @@ async def main():
             _motivo = _motivo[:300]
             try:
                 if dest_entity:
+                    _lat_r = f" | ⏱ {time.time() - _t_recv:.1f} s" if MOSTRAR_LATENCIA else ""
                     await client.send_message(dest_entity,
-                        f"⏭️ [{src_label}] NO se abrió {base} {side} (entrada {signal['entry']}) -> {_motivo}\nFuente: {src_label} Trades")
+                        f"⏭️ [{src_label}] NO se abrió {base} {side} (entrada {signal['entry']}) -> {_motivo}{_lat_r}\nFuente: {src_label} Trades")
             except Exception:
                 pass
             # Si falla por payout=0, intenta con stake mayor automaticamente
@@ -863,6 +1004,7 @@ async def main():
                 if ok2:
                     last_signals[key] = now
                     print(f"✅ Orden ejecutada en reintento [{src_label}] {base} cid={cid2} stake=${retry_stake}")
+                    _bump("abiertas")
                     try:
                         if dest_entity:
                             await client.send_message(dest_entity, f"✅ [{src_label}] Reintento OK en Deriv: {base} {side} Stake ${retry_stake} | CID {cid2}")
@@ -881,9 +1023,30 @@ async def main():
                     except: pass
                 else:
                     print(f"❌ Reintento fallo: {out2[-500:]}")
+                    _bump("rechazadas")
 
     # BE TRAILING SOLO PARA UK: TP1->BE, TP3->TP1, TP5->TP3  (REAL: opera en Deriv)
     uk_trailing = {}  # contract_id -> {entry, side, tps, current_sl_price, stage, lock}
+    # PARCHE 13: contratos BINARIOS del experimento paralelo (independiente del BE)
+    bin_trailing = {}
+    # PARCHE 15: contadores para el latido
+    ULTIMA_SENAL = {"t": 0.0}
+    SENALES_HOY = {"abiertas": 0, "rechazadas": 0, "dia": time.strftime("%Y-%m-%d")}
+
+    def _bump(tipo):
+        """PARCHE 15: cuenta aperturas/rechazos del dia para el latido."""
+        hoy = time.strftime("%Y-%m-%d")
+        if SENALES_HOY["dia"] != hoy:
+            SENALES_HOY.update({"abiertas": 0, "rechazadas": 0, "dia": hoy})
+        if tipo in SENALES_HOY:
+            SENALES_HOY[tipo] += 1
+        ULTIMA_SENAL["t"] = time.time()
+    BIN_TRAIL_FILE = "bin_trailing.json"
+    try:
+        if os.path.exists(BIN_TRAIL_FILE):
+            bin_trailing.update(json.loads(open(BIN_TRAIL_FILE).read() or "{}"))
+    except Exception as _ex:
+        print(f"⚠️ [BIN] no pude leer {BIN_TRAIL_FILE}: {_ex}")
     UK_TRAIL_FILE = "uk_trailing.json"
     UK_POLL_SEC = float(e("UK_BE_POLL_SEC", "5") or 5)
     BE_BACKUP_LOSS_PCT = float(e("BE_BACKUP_LOSS_PCT", "0.04") or 0.04)  # SL nativo de respaldo al llegar a TP1 (4% del stake)
@@ -950,6 +1113,141 @@ async def main():
         try:
             if dest_entity: await client.send_message(dest_entity, msg)
         except Exception: pass
+
+    # PARCHE 15: LATIDO. Un mensaje cada LATIDO_MIN minutos al espejo.
+    # Sirve para saber que el bot sigue vivo SIN abrir Railway: si pasan 2 ciclos
+    # sin latido, el bot esta caido. Ojo: solo se manda dentro de la ventana
+    # horaria (LATIDO_HORA_INI/FIN) para no despertar a nadie de madrugada.
+    LATIDO_INI = int(float(e("LATIDO_HORA_INI", "7") or 7))
+    LATIDO_FIN = int(float(e("LATIDO_HORA_FIN", "23") or 23))
+    _ultimo_latido = {"t": 0.0}
+
+    def _seg_desde(ts):
+        try:
+            return int(time.time() - float(ts))
+        except Exception:
+            return -1
+
+    async def latido():
+        if LATIDO_MIN <= 0:
+            print("💓 Latido apagado (LATIDO_MIN=0)")
+            return
+        print(f"💓 Latido activo: cada {LATIDO_MIN} min, de {LATIDO_INI}:00 a {LATIDO_FIN}:00")
+        while True:
+            try:
+                await asyncio.sleep(60)
+                if _ultimo_latido["t"] and (time.time() - _ultimo_latido["t"]) < LATIDO_MIN * 60:
+                    continue
+                hora_local = time.localtime().tm_hour
+                if not (LATIDO_INI <= hora_local < LATIDO_FIN):
+                    continue
+                abiertas = len(uk_trailing) + len(bin_trailing)
+                ult = _seg_desde(ULTIMA_SENAL["t"]) if ULTIMA_SENAL["t"] else -1
+                if ult < 0:
+                    txt_ult = "sin señales desde el arranque"
+                elif ult < 3600:
+                    txt_ult = f"última señal hace {ult // 60} min"
+                else:
+                    txt_ult = f"última señal hace {ult // 3600} h"
+                total = SENALES_HOY["abiertas"] + SENALES_HOY["rechazadas"]
+                msg = (f"💓 Bot vivo {time.strftime('%H:%M')} | "
+                       f"abiertas {abiertas} | hoy: {SENALES_HOY['abiertas']} abiertas / "
+                       f"{SENALES_HOY['rechazadas']} rechazadas | {txt_ult}")
+                print(msg)
+                if dest_entity:
+                    await client.send_message(dest_entity, msg)
+                _ultimo_latido["t"] = time.time()
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                print(f"⚠️ Latido error: {type(ex).__name__}: {ex!r}")
+                await asyncio.sleep(60)
+
+    async def monitor_binarias():
+        """
+        PARCHE 13: vigila las binarias del experimento (independiente del BE).
+          - Si el precio toca el SL  -> vende para cortar la perdida.
+          - Si el precio toca el TP1 -> vende (equivale al BE).
+          - Si no toca nada          -> deja vencer y reporta el resultado.
+        No toca para nada los multiplicadores.
+        """
+        print("🧪 Monitor BINARIAS iniciado (SL -> vende | TP1 -> vende | resto vence solo)")
+        ws_b = None
+        fails_b = {}
+        while True:
+            try:
+                await asyncio.sleep(UK_POLL_SEC)
+                if not bin_trailing:
+                    if ws_b is not None:
+                        try: await ws_b.close()
+                        except Exception: pass
+                        ws_b = None
+                    continue
+                if ws_b is None:
+                    ws_b = await _deriv_connect()
+                for cid, info in list(bin_trailing.items()):
+                    r = await _deriv_rpc(ws_b, {"proposal_open_contract": 1, "contract_id": int(cid)})
+                    if "error" in r:
+                        fails_b[cid] = fails_b.get(cid, 0) + 1
+                        if fails_b[cid] >= 8:
+                            bin_trailing.pop(cid, None)
+                            _save_bin()
+                        continue
+                    fails_b[cid] = 0
+                    poc = r.get("proposal_open_contract") or {}
+                    if poc.get("is_sold") or poc.get("is_expired") or poc.get("status") in ("sold", "won", "lost"):
+                        prof = poc.get("profit")
+                        try:
+                            prof = float(prof)
+                        except Exception:
+                            prof = 0.0
+                        res = "GANÓ" if prof > 0 else "PERDIÓ"
+                        st = info.get("stake", BIN_ESPEJO_STAKE)
+                        print(f"🧪 [BIN] {cid} vencida: {res} {prof:+.2f}")
+                        await _notify(f"🧪 [BIN {info.get('src','?')}] cerrada por vencimiento: {res} {prof:+.2f} "
+                                      f"(stake ${st}) — EXPERIMENTO")
+                        bin_trailing.pop(cid, None)
+                        _save_bin()
+                        continue
+                    try:
+                        spot = float(poc.get("current_spot"))
+                    except Exception:
+                        continue
+                    side = info["side"]
+                    sl_p = float(info["sl"])
+                    tps = info.get("tps") or []
+                    tp1 = min(tps, key=lambda t: abs(float(t) - float(info["entry"]))) if tps else float(info.get("entry"))
+                    toco_sl = (spot <= sl_p) if side == "BUY" else (spot >= sl_p)
+                    toco_tp = (spot >= float(tp1)) if side == "BUY" else (spot <= float(tp1))
+                    motivo = "SL" if toco_sl else ("TP1 (BE)" if toco_tp else None)
+                    if motivo:
+                        rs = await _deriv_rpc(ws_b, {"sell": int(cid), "price": 0})
+                        if "error" in rs:
+                            print(f"⚠️ [BIN] {cid} venta fallida ({motivo}): {rs.get('error')}")
+                            continue
+                        sold = (rs.get("sell") or {})
+                        vend = sold.get("sold_for") or sold.get("sell_price")
+                        print(f"🧪 [BIN] {cid} vendida por {motivo} en {spot} -> {vend}")
+                        await _notify(f"🧪 [BIN {info.get('src','?')}] vendida por {motivo} (spot {spot}). "
+                                      f"Recuperado: {vend} de ${info.get('stake')} — EXPERIMENTO")
+                        bin_trailing.pop(cid, None)
+                        _save_bin()
+                _save_bin()
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                print(f"⚠️ Monitor BIN error: {type(ex).__name__}: {ex!r}")
+                try:
+                    if ws_b is not None: await ws_b.close()
+                except Exception: pass
+                ws_b = None
+                await asyncio.sleep(5)
+
+    def _save_bin():
+        try:
+            open(BIN_TRAIL_FILE, "w").write(json.dumps(bin_trailing, indent=2))
+        except Exception:
+            pass
 
     async def monitor_uk_be():
         """Mueve la proteccion en Deriv: TP1->BE, TP3->TP1, TP5->TP3.
@@ -1053,6 +1351,12 @@ async def main():
 
     # Inicia monitor en background
     asyncio.create_task(monitor_uk_be())
+    asyncio.create_task(latido())
+    if BINARIA_ESPEJO:
+        asyncio.create_task(monitor_binarias())
+        print(f"🧪 EXPERIMENTO BINARIAS ACTIVO - stake aparte ${BIN_ESPEJO_STAKE} (el multiplicador sigue igual)")
+    else:
+        print("🧪 Experimento binarias apagado (BINARIA_ESPEJO=0). Todo igual que antes.")
 
     print("👂 Escuchando mensajes 24/7... (Ctrl+C para salir)")
     await client.run_until_disconnected()
